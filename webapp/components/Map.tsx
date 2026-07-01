@@ -237,7 +237,7 @@ export default function Map({ deviceStates, selectedId, onSelectDevice }: MapPro
             // Apply bearing rotation directly to SVG inside Leaflet marker DOM element
             const markerElement = existing.marker.getElement();
             if (markerElement) {
-              const svgElement = markerElement.querySelector('svg') as HTMLElement;
+              const svgElement = markerElement.querySelector('svg') as SVGSVGElement;
               if (svgElement) {
                 svgElement.style.transform = `rotate(${existing.bearing}deg)`;
               }
