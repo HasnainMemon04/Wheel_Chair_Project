@@ -116,23 +116,24 @@ export default function RiderPage() {
     }
 
     try {
-      // 1. Create client rental intent (reserved state)
-      const { data: profile } = await supabase.from('profiles').select('id').limit(1).single();
-      const userId = profile?.id || null;
-
-      const { data: rental, error: rError } = await supabase
-        .from('rentals')
-        .insert({
+      // 1. Create client rental intent (reserved state) via server API to bypass RLS securely
+      const resRental = await fetch('/api/rentals/create', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
           wheelchair_id: selectedId,
-          user_id: userId,
-          state: 'reserved',
-          duration_s: durationMinutes * 60,
-          speed_limit: 6
+          duration_s: durationMinutes * 60
         })
-        .select()
-        .single();
+      });
 
-      if (rError) throw rError;
+      if (!resRental.ok) {
+        const errData = await resRental.json();
+        throw new Error(errData.error || "Failed to create rental session");
+      }
+
+      const { rental } = await resRental.json();
 
       // 2. Trigger Mock Payment webhook route handler
       const res = await fetch('/api/payments/webhook', {
