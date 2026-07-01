@@ -1,0 +1,18 @@
+# ===========================================================================
+#  Smart Rental Wheelchair — Gitignore Config (Development Push)
+# ===========================================================================
+
+# Exclude heavy build artifacts and caches
+node_modules/
+.pio/
+__pycache__/
+supabase/.temp/
+.next/
+.vercel/
+*.log
+
+# Exclude standard IDE configuration directories
+.vscode/
+.idea/
+
+# Note: .env and private_config.h are intentionally tracked this time per request.
