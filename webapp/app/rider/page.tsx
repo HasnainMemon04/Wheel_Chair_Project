@@ -60,9 +60,9 @@ export default function RiderPage() {
   const availableChairs = deviceStates.filter(d => d.online && (!d.session_state || d.session_state === 'LOCKED' || d.session_state === 'AVAILABLE'));
   const selectedChair = deviceStates.find(d => d.wheelchair_id === selectedId);
 
-  // Computed live states (fall back to local timers if WebSocket drops)
+  // Computed live states: prefer local countdown timer for smooth 1s ticks, sync from server only if no local rental active
   const rentedChair = activeRental ? deviceStates.find(d => d.wheelchair_id === activeRental.wheelchair_id) : null;
-  const displayTimeLeft = rentedChair?.time_left !== undefined ? rentedChair.time_left : timeLeft;
+  const displayTimeLeft = activeRental ? timeLeft : (rentedChair?.time_left ?? 0);
   const displaySessionState = rentedChair?.session_state || (activeRental ? (timeLeft <= 120 ? (timeLeft <= 0 ? "LOCKED" : "EXPIRING") : "ACTIVE") : "AVAILABLE");
   const displayLocked = rentedChair?.locked !== undefined ? rentedChair.locked : (activeRental ? (timeLeft <= 0) : true);
   const displaySpeedLimit = rentedChair?.speed_limit || 6;
@@ -191,38 +191,31 @@ export default function RiderPage() {
     }
   };
 
-  // Cancel Rental Handler
+  // Cancel Rental Handler (optimistic UI — clears instantly, commands fire in background)
   const handleCancelRental = async () => {
     if (!activeRental || cancelTimeLeft <= 0) return;
-    setActionLoading(true);
 
-    try {
-      const targetId = activeRental.wheelchair_id;
+    const targetId = activeRental.wheelchair_id;
+    const durationMin = rentalTotalDuration / 60;
+    const price = durationMin <= 1 ? 0 : durationMin <= 15 ? 5.00 : 10.00;
 
-      // Send LOCK + END_SESSION to ESP32 via commands table
-      await supabase.from('commands').insert([
-        { wheelchair_id: targetId, cmd: 'LOCK', args: {}, status: 'pending', req_id: `cancel-lock-${Date.now()}` },
-        { wheelchair_id: targetId, cmd: 'END_SESSION', args: {}, status: 'pending', req_id: `cancel-end-${Date.now()}` }
-      ]);
-
-      // Refund wallet (using same price calculation)
-      const durationMin = rentalTotalDuration / 60;
-      const price = durationMin <= 1 ? 0 : durationMin <= 15 ? 5.00 : 10.00;
-      if (price > 0) {
-        updateWalletBalance(walletBalance + price);
-      }
-
-      // Clear local session
-      setActiveRental(null);
-      setTimeLeft(0);
-      setCancelDeadline(0);
-      setCancelTimeLeft(0);
-      setRentalTotalDuration(0);
-    } catch (err: any) {
-      alert("Cancel failed: " + err.message);
-    } finally {
-      setActionLoading(false);
+    // Optimistic: clear UI immediately so button feels instant
+    if (price > 0) {
+      updateWalletBalance(walletBalance + price);
     }
+    setActiveRental(null);
+    setTimeLeft(0);
+    setCancelDeadline(0);
+    setCancelTimeLeft(0);
+    setRentalTotalDuration(0);
+
+    // Fire commands to ESP32 in background (no await blocking UI)
+    supabase.from('commands').insert([
+      { wheelchair_id: targetId, cmd: 'LOCK', args: {}, status: 'pending', req_id: `cancel-lock-${Date.now()}` },
+      { wheelchair_id: targetId, cmd: 'END_SESSION', args: {}, status: 'pending', req_id: `cancel-end-${Date.now()}` }
+    ]).then(({ error }) => {
+      if (error) console.error('Cancel command dispatch error:', error);
+    });
   };
 
   // Dispatch SOS command directly from Rider Panel
