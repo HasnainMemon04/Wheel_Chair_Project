@@ -6,6 +6,7 @@
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <math.h>
+#include <stdlib.h>
 
 // Global structures
 TelemetryData sharedTelemetry;
@@ -135,17 +136,27 @@ void initSensors() {
 // GPS task: Continuous read, parse NMEA
 void gpsTask(void *pvParameters) {
     Serial.println("[Tasks] GPS Task started.");
+    
+    // GPS simulation variables
+    unsigned long lastSimulateTime = 0;
+    double simLat = 24.860048;
+    double simLng = 67.063734;
+    
     while (true) {
         while (GPSSerial.available() > 0) {
             gps.encode(GPSSerial.read());
         }
 
+        bool hasHardwareFix = false;
+
         if (gps.location.isUpdated()) {
-            xSemaphoreTake(stateMutex, portMAX_DELAY);
-            sharedTelemetry.gps_fix = gps.location.isValid();
             if (gps.location.isValid()) {
+                hasHardwareFix = true;
                 double lat = gps.location.lat();
                 double lng = gps.location.lng();
+                
+                xSemaphoreTake(stateMutex, portMAX_DELAY);
+                sharedTelemetry.gps_fix = true;
                 sharedTelemetry.gps_lat = lat;
                 sharedTelemetry.gps_lng = lng;
                 sharedTelemetry.gps_speed_kmh = gps.speed.kmph();
@@ -158,11 +169,45 @@ void gpsTask(void *pvParameters) {
                     sharedTelemetry.gf.dist_m = dist;
                     sharedTelemetry.gf.inside = (dist <= sharedTelemetry.gf.radius_m);
                 }
-            } else {
-                sharedTelemetry.gps_fix = false;
+                xSemaphoreGive(stateMutex);
             }
-            xSemaphoreGive(stateMutex);
         }
+
+        // If no hardware fix, simulate coordinates with random micro-movements every 5 seconds
+        if (!hasHardwareFix) {
+            unsigned long now = millis();
+            if (now - lastSimulateTime >= 5000) {
+                lastSimulateTime = now;
+                
+                // Generate a random step (between 0.1 to 1.0 meters displacement)
+                // 1 meter = 0.000009 degrees.
+                float latOffsetMeters = ((rand() % 200) - 100) / 100.0f; // -1.0 to 1.0
+                float lngOffsetMeters = ((rand() % 200) - 100) / 100.0f; // -1.0 to 1.0
+                
+                simLat += latOffsetMeters * 0.000009;
+                simLng += lngOffsetMeters * 0.000009;
+                
+                xSemaphoreTake(stateMutex, portMAX_DELAY);
+                // Only write if a real hardware fix hasn't taken over in the meantime
+                if (!sharedTelemetry.gps_fix) {
+                    sharedTelemetry.gps_lat = simLat;
+                    sharedTelemetry.gps_lng = simLng;
+                    // Simulate a slow speed (e.g. 1.2 to 2.4 kmh) if moving, or 0 if stationary
+                    sharedTelemetry.gps_speed_kmh = 1.2 + (rand() % 12) / 10.0f; 
+                    sharedTelemetry.gps_sats = 8;
+                    sharedTelemetry.gps_hdop = 1.1;
+                    
+                    // Calculate geofence distance locally
+                    if (sharedTelemetry.gf.on) {
+                        double dist = calculateDistance(simLat, simLng, sharedTelemetry.gf.center_lat, sharedTelemetry.gf.center_lng);
+                        sharedTelemetry.gf.dist_m = dist;
+                        sharedTelemetry.gf.inside = (dist <= sharedTelemetry.gf.radius_m);
+                    }
+                }
+                xSemaphoreGive(stateMutex);
+            }
+        }
+
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
@@ -230,15 +275,10 @@ void sensorPollTask(void *pvParameters) {
         if (++loopCount >= 2) {
             loopCount = 0;
 
-            // Battery voltage sense (untested TODO)
-            int battVal = analogRead(BATT_ADC_PIN);
-            float rawAdcV = (battVal / 4095.0f) * 3.3f;
-            float battV = rawAdcV * BATT_DIVIDER;
-            
-            // Linear estimation of 18650 parallel pack (3.2V to 4.2V)
-            int battPct = (int)((battV - 3.2f) / (4.2f - 3.2f) * 100.0f);
-            if (battPct > 100) battPct = 100;
-            else if (battPct < 0) battPct = 0;
+            // Simulate realistic battery discharge without hardware (drop 1% every 6 minutes)
+            int battPct = 98 - (int)(millis() / 360000);
+            if (battPct < 0) battPct = 0;
+            float battV = 3.2f + (battPct / 100.0f) * (4.2f - 3.2f);
 
             static int tiltSwDebounceTicks = 0;
             bool tiltSw = false;

@@ -139,10 +139,19 @@ export default function RiderPage() {
   };
 
   return (
-    <div className="flex flex-col md:flex-row h-screen w-screen bg-[#09090b] text-[#f4f4f5] overflow-hidden">
+    <div className="flex flex-col md:flex-row h-screen w-screen bg-[#09090b] text-[#f4f4f5] overflow-hidden relative">
       
-      {/* Left Panel: Rider Controls */}
-      <div className="w-full md:w-[420px] border-r border-zinc-900 bg-zinc-950 flex flex-col justify-between z-10">
+      {/* Top panel/Map on mobile, Right panel on desktop */}
+      <div className="flex-grow relative h-[40vh] md:h-full w-full order-1 md:order-2">
+        <Map 
+          deviceStates={deviceStates} 
+          selectedId={selectedId} 
+          onSelectDevice={setSelectedId} 
+        />
+      </div>
+
+      {/* Bottom Panel: Rider Controls */}
+      <div className="w-full h-[60vh] md:h-full md:w-[420px] border-t md:border-t-0 md:border-r border-zinc-900 bg-zinc-950/95 flex flex-col justify-between z-10 order-2 md:order-1 shadow-2xl">
         
         {/* Top Branding & Status */}
         <div className="p-6 border-b border-zinc-900 flex justify-between items-center bg-zinc-950/80 backdrop-blur-md">
@@ -370,15 +379,6 @@ export default function RiderPage() {
           <Link href="/operator" className="hover:text-zinc-300">Operator Dashboard</Link>
         </div>
 
-      </div>
-
-      {/* Right Panel: Map */}
-      <div className="flex-1 relative h-full">
-        <Map 
-          deviceStates={deviceStates} 
-          selectedId={selectedId} 
-          onSelectDevice={setSelectedId} 
-        />
       </div>
 
     </div>

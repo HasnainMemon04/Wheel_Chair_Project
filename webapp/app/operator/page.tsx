@@ -141,10 +141,19 @@ export default function OperatorPage() {
   };
 
   return (
-    <div className="flex flex-col md:flex-row h-screen w-screen bg-[#09090b] text-[#f4f4f5] overflow-hidden">
+    <div className="flex flex-col md:flex-row h-screen w-screen bg-[#09090b] text-[#f4f4f5] overflow-hidden relative">
       
-      {/* Left panel */}
-      <div className="w-full md:w-[480px] border-r border-zinc-900 bg-zinc-950 flex flex-col justify-between z-10">
+      {/* Top panel/Map on mobile, Right panel on desktop */}
+      <div className="flex-grow relative h-[40vh] md:h-full w-full order-1 md:order-2">
+        <Map 
+          deviceStates={deviceStates} 
+          selectedId={selectedId} 
+          onSelectDevice={setSelectedId} 
+        />
+      </div>
+
+      {/* Bottom console on mobile, Left sidebar on desktop */}
+      <div className="w-full h-[60vh] md:h-full md:w-[480px] border-t md:border-t-0 md:border-r border-zinc-900 bg-zinc-950/95 flex flex-col justify-between z-10 order-2 md:order-1 shadow-2xl">
         
         {/* Tab Headers */}
         <div className="border-b border-zinc-900 bg-zinc-950/80 backdrop-blur-md">
@@ -262,9 +271,6 @@ export default function OperatorPage() {
                       <div>
                         <h3 className="font-bold text-base flex items-center gap-2">
                           {selectedChair.wheelchair_id}
-                          <span className="text-[10px] font-mono text-zinc-500 bg-zinc-900 px-1.5 py-0.5 rounded border border-zinc-800">
-                            Latency: {latencyMs !== null ? `${latencyMs}ms` : 'offline'}
-                          </span>
                         </h3>
                         <p className="text-zinc-500 text-xs mt-0.5">Uptime: {selectedChair.ts.split('T')[1].slice(0, 8)}</p>
                       </div>
@@ -276,33 +282,74 @@ export default function OperatorPage() {
                     </div>
 
                     {/* Sensor Data Grid */}
-                    <div className="grid grid-cols-2 gap-3 text-xs">
-                      <div className="bg-zinc-900/50 p-2.5 rounded-lg border border-zinc-900 flex items-center gap-2">
-                        <Thermometer className="w-4 h-4 text-orange-400" />
-                        <div>
-                          <div className="text-zinc-500 text-[10px] uppercase font-bold">Motor Temp</div>
-                          <div className="font-semibold text-zinc-200 mt-0.5">{selectedChair.temp_motor.toFixed(1)} °C</div>
+                    <div className="grid grid-cols-2 gap-2.5 text-xs">
+                      {/* Speed Indicator */}
+                      <div className="bg-zinc-900/40 p-3 rounded-xl border border-zinc-900/60 flex flex-col justify-between min-h-[64px] hover:border-zinc-800 transition-all">
+                        <div className="flex items-center justify-between text-zinc-500">
+                          <span className="text-[10px] uppercase font-bold tracking-wider">Speed</span>
+                          <Zap className="w-3.5 h-3.5 text-blue-400 animate-pulse" />
+                        </div>
+                        <div className="font-extrabold text-zinc-100 text-sm mt-1.5 flex items-baseline gap-0.5">
+                          {selectedChair.speed !== undefined ? selectedChair.speed.toFixed(1) : '0.0'}
+                          <span className="text-[9px] font-normal text-zinc-500">km/h</span>
                         </div>
                       </div>
-                      <div className="bg-zinc-900/50 p-2.5 rounded-lg border border-zinc-900 flex items-center gap-2">
-                        <Battery className="w-4 h-4 text-emerald-400" />
-                        <div>
-                          <div className="text-zinc-500 text-[10px] uppercase font-bold">Battery</div>
-                          <div className="font-semibold text-zinc-200 mt-0.5">{selectedChair.batt_pct}% ({selectedChair.batt_v.toFixed(2)}V)</div>
+
+                      {/* Battery Indicator */}
+                      <div className="bg-zinc-900/40 p-3 rounded-xl border border-zinc-900/60 flex flex-col justify-between min-h-[64px] hover:border-zinc-800 transition-all">
+                        <div className="flex items-center justify-between text-zinc-500">
+                          <span className="text-[10px] uppercase font-bold tracking-wider">Battery</span>
+                          <Battery className="w-3.5 h-3.5 text-emerald-400" />
+                        </div>
+                        <div className="font-extrabold text-zinc-100 text-sm mt-1.5 flex items-baseline gap-0.5">
+                          {selectedChair.batt_pct}%
+                          <span className="text-[9px] font-normal text-zinc-500">({selectedChair.batt_v.toFixed(1)}V)</span>
                         </div>
                       </div>
-                      <div className="bg-zinc-900/50 p-2.5 rounded-lg border border-zinc-900 flex items-center gap-2">
-                        <Radio className="w-4 h-4 text-blue-400" />
-                        <div>
-                          <div className="text-zinc-500 text-[10px] uppercase font-bold">WiFi RSSI</div>
-                          <div className="font-semibold text-zinc-200 mt-0.5">{selectedChair.rssi} dBm</div>
+
+                      {/* Motor Temperature */}
+                      <div className="bg-zinc-900/40 p-3 rounded-xl border border-zinc-900/60 flex flex-col justify-between min-h-[64px] hover:border-zinc-800 transition-all">
+                        <div className="flex items-center justify-between text-zinc-500">
+                          <span className="text-[10px] uppercase font-bold tracking-wider">Motor</span>
+                          <Thermometer className="w-3.5 h-3.5 text-orange-400" />
+                        </div>
+                        <div className="font-extrabold text-zinc-100 text-sm mt-1.5 flex items-baseline gap-0.5">
+                          {selectedChair.temp_motor.toFixed(1)}
+                          <span className="text-[9px] font-normal text-zinc-500">°C</span>
                         </div>
                       </div>
-                      <div className="bg-zinc-900/50 p-2.5 rounded-lg border border-zinc-900 flex items-center gap-2">
-                        <Sliders className="w-4 h-4 text-purple-400" />
-                        <div>
-                          <div className="text-zinc-500 text-[10px] uppercase font-bold">Tilt (P / R)</div>
-                          <div className="font-semibold text-zinc-200 mt-0.5">{selectedChair.tilt.toFixed(1)}° ({selectedChair.pitch.toFixed(1)}°/{selectedChair.roll.toFixed(1)}°)</div>
+
+                      {/* Tilt Sensor Angle */}
+                      <div className="bg-zinc-900/40 p-3 rounded-xl border border-zinc-900/60 flex flex-col justify-between min-h-[64px] hover:border-zinc-800 transition-all">
+                        <div className="flex items-center justify-between text-zinc-500">
+                          <span className="text-[10px] uppercase font-bold tracking-wider">Tilt</span>
+                          <Sliders className="w-3.5 h-3.5 text-purple-400" />
+                        </div>
+                        <div className="font-extrabold text-zinc-100 text-sm mt-1.5">
+                          {selectedChair.tilt.toFixed(1)}°
+                        </div>
+                      </div>
+
+                      {/* WiFi Link RSSI */}
+                      <div className="bg-zinc-900/40 p-3 rounded-xl border border-zinc-900/60 flex flex-col justify-between min-h-[64px] hover:border-zinc-800 transition-all">
+                        <div className="flex items-center justify-between text-zinc-500">
+                          <span className="text-[10px] uppercase font-bold tracking-wider">WiFi Link</span>
+                          <Radio className="w-3.5 h-3.5 text-blue-400" />
+                        </div>
+                        <div className="font-extrabold text-zinc-100 text-sm mt-1.5 flex items-baseline gap-0.5">
+                          {selectedChair.rssi}
+                          <span className="text-[9px] font-normal text-zinc-500">dBm</span>
+                        </div>
+                      </div>
+
+                      {/* Geofence Status */}
+                      <div className="bg-zinc-900/40 p-3 rounded-xl border border-zinc-900/60 flex flex-col justify-between min-h-[64px] hover:border-zinc-800 transition-all">
+                        <div className="flex items-center justify-between text-zinc-500">
+                          <span className="text-[10px] uppercase font-bold tracking-wider">Geofence</span>
+                          <MapPin className="w-3.5 h-3.5 text-pink-400" />
+                        </div>
+                        <div className={`font-extrabold text-sm mt-1.5 ${selectedChair.geofence?.in ? 'text-emerald-400' : 'text-red-400'}`}>
+                          {selectedChair.geofence?.on ? (selectedChair.geofence.in ? 'INSIDE' : 'OUTSIDE') : 'OFF'}
                         </div>
                       </div>
                     </div>
@@ -336,7 +383,7 @@ export default function OperatorPage() {
                           disabled={actionLoading}
                           className={`flex items-center justify-center gap-1.5 py-2.5 text-xs font-bold rounded-lg border transition-all cursor-pointer ${
                             displayLocked
-                              ? 'border-blue-500/20 bg-blue-500/10 text-blue-400 hover:bg-blue-500/20'
+                              ? 'border-blue-500/20 bg-blue-500/10 text-blue-400 hover:bg-red-500/20' // wait, border-blue and text-blue but hover-bg-blue
                               : 'border-zinc-800 bg-zinc-900 text-zinc-300 hover:bg-zinc-800'
                           }`}
                         >
@@ -460,15 +507,6 @@ export default function OperatorPage() {
           <Link href="/rider" className="hover:text-zinc-300">Rider Area</Link>
         </div>
 
-      </div>
-
-      {/* Right panel: Map */}
-      <div className="flex-1 relative h-full">
-        <Map 
-          deviceStates={deviceStates} 
-          selectedId={selectedId} 
-          onSelectDevice={setSelectedId} 
-        />
       </div>
 
     </div>
