@@ -8,7 +8,7 @@ import { useFleetState, DeviceState } from '../../hooks/useFleetState';
 import { supabase } from '../../utils/supabase';
 import { 
   MapPin, Battery, ShieldAlert, Zap, Clock, CreditCard, 
-  PlusCircle, CheckCircle2, Lock, AlertTriangle 
+  PlusCircle, CheckCircle2, Lock, AlertTriangle, XCircle 
 } from 'lucide-react';
 
 // Dynamically import Leaflet Map to avoid Next.js SSR "window is not defined" crashes
@@ -29,6 +29,11 @@ export default function RiderPage() {
   const [timeLeft, setTimeLeft] = useState<number>(0);
   const [actionLoading, setActionLoading] = useState(false);
   const [seeding, setSeeding] = useState(false);
+
+  // Cancel window tracking: 10% of total rental duration
+  const [rentalTotalDuration, setRentalTotalDuration] = useState<number>(0);
+  const [cancelDeadline, setCancelDeadline] = useState<number>(0); // epoch ms
+  const [cancelTimeLeft, setCancelTimeLeft] = useState<number>(0); // seconds remaining
 
   // Simulated Wallet States (SAR currency for Saudi Arabia clients)
   const [walletBalance, setWalletBalance] = useState<number>(150.00);
@@ -78,6 +83,19 @@ export default function RiderPage() {
 
     return () => clearInterval(interval);
   }, [activeRental, timeLeft]);
+
+  // Cancel window countdown timer (10% of rental time)
+  useEffect(() => {
+    if (!activeRental || cancelDeadline <= 0) return;
+
+    const tick = setInterval(() => {
+      const remaining = Math.max(0, Math.floor((cancelDeadline - Date.now()) / 1000));
+      setCancelTimeLeft(remaining);
+      if (remaining <= 0) clearInterval(tick);
+    }, 250);
+
+    return () => clearInterval(tick);
+  }, [activeRental, cancelDeadline]);
 
   // Seed a wheelchair for easy dev testing
   const handleSeedMockWheelchair = async () => {
@@ -156,11 +174,52 @@ export default function RiderPage() {
       updateWalletBalance(walletBalance - price);
 
       // Set active local session
+      const totalSec = durationMinutes * 60;
       setActiveRental(rental);
-      setTimeLeft(durationMinutes * 60);
+      setTimeLeft(totalSec);
+      setRentalTotalDuration(totalSec);
+
+      // Set cancel window: 10% of total rental time (minimum 6s for demo)
+      const cancelWindowSec = Math.max(6, Math.floor(totalSec * 0.1));
+      setCancelDeadline(Date.now() + cancelWindowSec * 1000);
+      setCancelTimeLeft(cancelWindowSec);
       
     } catch (err: any) {
       alert("Booking error: " + err.message);
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  // Cancel Rental Handler
+  const handleCancelRental = async () => {
+    if (!activeRental || cancelTimeLeft <= 0) return;
+    setActionLoading(true);
+
+    try {
+      const targetId = activeRental.wheelchair_id;
+
+      // Send LOCK + END_SESSION to ESP32 via commands table
+      await supabase.from('commands').insert([
+        { wheelchair_id: targetId, cmd: 'LOCK', args: {}, status: 'pending', req_id: `cancel-lock-${Date.now()}` },
+        { wheelchair_id: targetId, cmd: 'END_SESSION', args: {}, status: 'pending', req_id: `cancel-end-${Date.now()}` }
+      ]);
+
+      // Refund wallet (using same price calculation)
+      const durationMin = rentalTotalDuration / 60;
+      const price = durationMin <= 1 ? 0 : durationMin <= 15 ? 5.00 : 10.00;
+      if (price > 0) {
+        updateWalletBalance(walletBalance + price);
+      }
+
+      // Clear local session
+      setActiveRental(null);
+      setTimeLeft(0);
+      setCancelDeadline(0);
+      setCancelTimeLeft(0);
+      setRentalTotalDuration(0);
+    } catch (err: any) {
+      alert("Cancel failed: " + err.message);
     } finally {
       setActionLoading(false);
     }
@@ -326,12 +385,45 @@ export default function RiderPage() {
                   </div>
                 </div>
 
+                {/* Cancel Booking Button — available for first 10% of rental time */}
+                {!displayLocked && (
+                  <div className="mt-3.5 space-y-2">
+                    <button
+                      onClick={handleCancelRental}
+                      disabled={actionLoading || cancelTimeLeft <= 0}
+                      className={`w-full flex items-center justify-center gap-2 py-2.5 text-xs font-bold rounded-lg border transition-all uppercase tracking-wider ${
+                        cancelTimeLeft > 0
+                          ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 cursor-pointer'
+                          : 'border-zinc-700/40 bg-zinc-800/30 text-zinc-600 cursor-not-allowed'
+                      }`}
+                    >
+                      <XCircle className="w-3.5 h-3.5" />
+                      {cancelTimeLeft > 0
+                        ? `Cancel Booking (${formatTime(cancelTimeLeft)} left)`
+                        : 'Cancellation Window Expired'}
+                    </button>
+                    {/* Progress bar for cancel window */}
+                    {rentalTotalDuration > 0 && (
+                      <div className="w-full h-1 rounded-full bg-zinc-800 overflow-hidden">
+                        <div
+                          className={`h-full rounded-full transition-all duration-300 ${
+                            cancelTimeLeft > 0 ? 'bg-emerald-500' : 'bg-zinc-600'
+                          }`}
+                          style={{
+                            width: `${Math.min(100, (cancelTimeLeft / Math.max(1, Math.floor(rentalTotalDuration * 0.1))) * 100)}%`
+                          }}
+                        />
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {/* Manual SOS Panic Trigger */}
                 {!displayLocked && (
                   <button
                     onClick={() => triggerRiderCommand(rentedChair?.session_state === 'SAFE_FAULT' ? 'CLEAR_SOS' : 'SOS')}
                     disabled={actionLoading}
-                    className={`mt-3.5 w-full flex items-center justify-center gap-1.5 py-2.5 text-xs font-bold rounded-lg border transition-all cursor-pointer uppercase tracking-wider ${
+                    className={`mt-2 w-full flex items-center justify-center gap-1.5 py-2.5 text-xs font-bold rounded-lg border transition-all cursor-pointer uppercase tracking-wider ${
                       rentedChair?.session_state === 'SAFE_FAULT'
                         ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20'
                         : 'border-red-500/25 bg-red-500/10 text-red-500 hover:bg-red-500/20'
