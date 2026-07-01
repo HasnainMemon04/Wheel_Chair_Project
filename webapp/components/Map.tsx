@@ -140,6 +140,11 @@ export default function Map({ deviceStates, selectedId, onSelectDevice }: MapPro
               !online ? 'Offline' : isTampered ? 'Tamper Alarm' : isBreached ? 'Breached' : locked ? 'Locked' : 'Active'
             }</span></p>
             <p class="text-xs text-muted-foreground">Battery: ${device.batt_pct}% (${device.batt_v.toFixed(2)}V)</p>
+            ${
+              device.temp_amb !== undefined && device.temp_amb !== null
+                ? `<p class="text-xs text-muted-foreground mt-0.5">Climate: ${device.temp_amb.toFixed(1)}°C / ${device.humidity.toFixed(1)}%</p>`
+                : ''
+            }
           </div>
         `;
         marker.bindPopup(popupContent);
@@ -192,6 +197,11 @@ export default function Map({ deviceStates, selectedId, onSelectDevice }: MapPro
               !online ? 'Offline' : isTampered ? 'Tamper Alarm' : isBreached ? 'Breached' : locked ? 'Locked' : 'Active'
             }</span></p>
             <p class="text-xs text-muted-foreground">Battery: ${device.batt_pct}% (${device.batt_v.toFixed(2)}V)</p>
+            ${
+              device.temp_amb !== undefined && device.temp_amb !== null
+                ? `<p class="text-xs text-muted-foreground mt-0.5">Climate: ${device.temp_amb.toFixed(1)}°C / ${device.humidity.toFixed(1)}%</p>`
+                : ''
+            }
           </div>
         `;
         existing.marker.setPopupContent(popupContent);

@@ -51,6 +51,7 @@ struct TelemetryData {
 // Global shared state and synchronization
 extern TelemetryData sharedTelemetry;
 extern SemaphoreHandle_t stateMutex;
+extern bool mpuOK;
 
 // Initialization and FreeRTOS tasks
 void initSensors();

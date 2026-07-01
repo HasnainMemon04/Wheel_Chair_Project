@@ -153,10 +153,9 @@ void safetySupervisorTask(void *pvParameters) {
     while (true) {
         loopTicks++;
 
-        // Handle non-blocking buzzer warning beeps
+        // Handle non-blocking buzzer warning beeps decrement
         if (buzzerBeepTicks > 0) {
             buzzerBeepTicks--;
-            buzzerWrite(true);
         }
 
         // Read shared state values
@@ -202,8 +201,8 @@ void safetySupervisorTask(void *pvParameters) {
             if (fallBreachTicks >= 10) {
                 fallBreached = true;
             }
-        } else if (tiltSwActive) {
-            // Digital switch breach alone - require longer confirmation (1.5 seconds = 30 ticks)
+        } else if (tiltSwActive && (!mpuOK || tilt > TILT_WARN_DEG)) {
+            // Digital switch breach - only if MPU6050 is offline or MPU6050 also confirms some tilt
             fallBreachTicks++;
             if (fallBreachTicks >= 30) {
                 fallBreached = true;
@@ -220,7 +219,7 @@ void safetySupervisorTask(void *pvParameters) {
         }
 
         // Auto-reset fall & manual SOS interlock if operator clears state (and device uprighted if fall occurred)
-        bool canClearFall = !fallLatched || (tilt < TILT_WARN_DEG && !tiltSwActive);
+        bool canClearFall = !fallLatched || (tilt < TILT_WARN_DEG);
         if ((fallLatched || manualSOSLatched) && canClearFall) {
             // If operator sent LOCK or UNLOCK (meaning state transitioned away from SAFE_FAULT)
             if (state == "LOCKED" || state == "ACTIVE") {
@@ -236,12 +235,6 @@ void safetySupervisorTask(void *pvParameters) {
         bool safetyInterlockActive = (overtempLatched || fallLatched || manualSOSLatched);
 
         if (safetyInterlockActive) {
-            // Relays force fail-safe open states
-            setPowerRelay(!overtempLatched);  // Complete power shutdown if overtemp
-            setMotionRelay(false);            // Disables motion instantly
-            buzzerWrite(true);                // Force continuous siren
-            updateRGBLED(255, 0, 0);          // Red LED indicator
-            
             state = "SAFE_FAULT";
             locked = true;
 
@@ -261,28 +254,13 @@ void safetySupervisorTask(void *pvParameters) {
         } else {
             // Normal Operating Mode (No active interlocks)
             
-            // Turn off continuous siren pin driving if not warning-beeping and
-            // not in a latched tamper alarm.
-            if (buzzerBeepTicks <= 0 && !tamperAlarmLatched) {
-                buzzerWrite(false);
-            }
-
             // Local 1-second timer tick (runs once per second = 20 ticks)
             bool tickSecond = (loopTicks % 20 == 0);
 
             // ---- Anti-tamper security (SW-520D), armed only while LOCKED ----
-            // While the chair is locked, a burst of tilt-switch edges means
-            // someone is moving/shaking it. Each burst counts as one disturbance:
-            // the first few are warning chirps, the TAMPER_ALARM_AT-th latches a
-            // continuous siren and reports a TAMPER event to the cloud.
-            // Armed whenever the chair is locked/parked (independent of the motor
-            // power relay — the ESP32 + buzzer run on aux power, so a locked chair
-            // that was powered off is still guarded against theft/tampering).
             bool tamperArmedNow = (locked && state == "LOCKED");
             if (tamperArmedNow) {
                 if (!tamperArmed) {
-                    // Just armed — drop stale pre-lock edges so handing the chair
-                    // over / locking it doesn't immediately trip the alarm.
                     tamperArmed = true;
                     resetTamperEdges();
                 }
@@ -310,7 +288,6 @@ void safetySupervisorTask(void *pvParameters) {
                     }
                 }
             } else {
-                // Disarmed (unlocked / rented / powered off) — stand down and reset.
                 if (tamperArmed) resetTamperEdges();
                 tamperArmed = false;
                 tamperWarnCount = 0;
@@ -329,7 +306,6 @@ void safetySupervisorTask(void *pvParameters) {
                         reportSafetyEvent("OVERSPEED", "{\"speed\":" + String(speedGps) + ",\"limit\":" + String(speedLimit) + "}");
                         Serial.println("[Safety] Sustained overspeed interlock triggered! Locked.");
                     } else {
-                        // Rapid escalating buzzer warnings (100ms beep every 300ms)
                         if (loopTicks % 6 == 0) {
                             buzzerBeepTicks = 2; // 100ms chirp
                         }
@@ -343,13 +319,11 @@ void safetySupervisorTask(void *pvParameters) {
 
             // Tilt Warning checks (MPU6050 tilt > 30 deg but <= 50 deg)
             if (tilt > TILT_WARN_DEG && tilt <= TILT_FALL_DEG) {
-                // Flash yellow status LED
                 if ((loopTicks / 5) % 2 == 0) {
                     updateRGBLED(255, 120, 0);
                 } else {
                     updateRGBLED(0, 0, 0);
                 }
-                // warning beep (50ms every 1 second)
                 if (tickSecond) {
                     buzzerBeepTicks = 1;
                     if (!tiltWarnLatched) {
@@ -358,7 +332,6 @@ void safetySupervisorTask(void *pvParameters) {
                     }
                 }
             } else if (tilt < TILT_WARN_DEG - 3.0f) {
-                // Clear warning latch with small hysteresis buffer
                 tiltWarnLatched = false;
             }
 
@@ -376,37 +349,33 @@ void safetySupervisorTask(void *pvParameters) {
                 Serial.println("[Safety] GEOFENCE_ENTER. Speed limit restrictions lifted.");
             }
 
-            // Local timer countdown (runs once per second = 20 ticks)
-            if (tickSecond && power && !locked) {
-                if (state == "ACTIVE" || state == "EXPIRING") {
-                    if (timeLeft > 0) {
-                        timeLeft--;
-                        
-                        // Enter warning window locally (idempotent, won't override locked states)
-                        if (timeLeft <= 120 && state == "ACTIVE") {
-                            state = "EXPIRING";
-                            Serial.println("[Session] Local countdown entered warning window (<= 120s).");
-                        }
-                        
-                        if (timeLeft <= 0) {
+            // Time Limit Auto-Expiration check (Rider state only)
+            if (state == "ACTIVE" || state == "EXPIRING" || state == "ENDING") {
+                if (tickSecond) {
+                    xSemaphoreTake(stateMutex, portMAX_DELAY);
+                    if (sharedTelemetry.time_left_s > 0) {
+                        sharedTelemetry.time_left_s--;
+                    }
+                    timeLeft = sharedTelemetry.time_left_s;
+                    xSemaphoreGive(stateMutex);
+
+                    if (timeLeft <= 0) {
+                        if (state != "ENDING") {
                             state = "ENDING";
                             endingRampTicks = 0;
-                            Serial.println("[Session] Local countdown ended. Ramping down speed.");
                         }
+                    } else if (timeLeft <= EXPIRY_WARN_S && state == "ACTIVE") {
+                        state = "EXPIRING";
                     }
                 }
-            }
 
-            // Deceleration speed ramp handling (5 seconds at 20Hz = 100 ticks)
-            if (state == "ENDING") {
-                endingRampTicks++;
-                if (endingRampTicks >= 100) {
-                    state = "LOCKED";
-                    locked = true;
-                    timeLeft = 0;
-                    buzzerBeepTicks = 10; // Play 500ms locking tone
-                    Serial.println("[Session] Speed ramp-down complete. Relays opened. LOCKED.");
-                } else {
+                if (state == "ENDING") {
+                    if (endingRampTicks < 100) {
+                        endingRampTicks++;
+                    } else {
+                        state = "LOCKED";
+                        locked = true;
+                    }
                     int virtualRampedLimit = (speedLimit * (100 - endingRampTicks)) / 100;
                     if (endingRampTicks % 20 == 0) {
                         Serial.printf("[Session] Decelerating... Target speed limit: %d km/h\n", virtualRampedLimit);
@@ -431,50 +400,73 @@ void safetySupervisorTask(void *pvParameters) {
                     buzzerBeepTicks = 2; // 100ms warning beep
                 }
             }
+        }
 
-            // Save state updates back to shared data structures
-            xSemaphoreTake(stateMutex, portMAX_DELAY);
-            // If the database states were updated by a command in the middle of our 50ms tick,
-            // we synchronize our local variables so we don't stomp them.
-            if (sharedTelemetry.session_state != "SAFE_FAULT") {
-                if (sharedTelemetry.power_state != power) {
-                    power = sharedTelemetry.power_state;
-                }
-                if (sharedTelemetry.locked_state != locked) {
-                    locked = sharedTelemetry.locked_state;
-                }
-                if (sharedTelemetry.session_state != state) {
-                    state = sharedTelemetry.session_state;
-                }
+        // 4. Save state updates back to shared data structures
+        xSemaphoreTake(stateMutex, portMAX_DELAY);
+        
+        // If the database states were updated by a command in the middle of our 50ms tick,
+        // and we don't have an active safety interlock, synchronize our local variables.
+        if (sharedTelemetry.session_state != "SAFE_FAULT" && !safetyInterlockActive) {
+            if (sharedTelemetry.power_state != power) {
+                power = sharedTelemetry.power_state;
             }
-            sharedTelemetry.session_state = state;
-            sharedTelemetry.time_left_s = timeLeft;
-            sharedTelemetry.locked_state = locked;
-            sharedTelemetry.tamper_alarm = tamperAlarmLatched;
-            sharedTelemetry.tamper_warn_count = tamperWarnCount;
-            xSemaphoreGive(stateMutex);
+            if (sharedTelemetry.locked_state != locked) {
+                locked = sharedTelemetry.locked_state;
+            }
+            if (sharedTelemetry.session_state != state) {
+                state = sharedTelemetry.session_state;
+            }
+        }
 
+        sharedTelemetry.session_state = state;
+        sharedTelemetry.power_state = power;
+        sharedTelemetry.locked_state = locked;
+        sharedTelemetry.time_left_s = timeLeft;
+        sharedTelemetry.tamper_alarm = tamperAlarmLatched;
+        sharedTelemetry.tamper_warn_count = tamperWarnCount;
+        xSemaphoreGive(stateMutex);
+
+        // 5. Update physical actuators based on final resolved states
+        if (safetyInterlockActive) {
+            setPowerRelay(!overtempLatched);  // Complete power shutdown if overtemp
+            setMotionRelay(false);            // Disables motion instantly
+            buzzerWrite(true);                // Force continuous siren
+            updateRGBLED(255, 0, 0);          // Red LED indicator
+        } else {
             // Latched tamper alarm: continuous siren + fast red/blue LED flash.
             if (tamperAlarmLatched) {
                 buzzerWrite(true);
                 updateRGBLED((loopTicks / 3) % 2 == 0 ? 255 : 0, 0, (loopTicks / 3) % 2 == 0 ? 0 : 255);
+            } else {
+                // Warning beep ticks
+                if (buzzerBeepTicks > 0) {
+                    buzzerWrite(true);
+                } else {
+                    buzzerWrite(false);
+                }
+                
+                // LED state
+                if (power) {
+                    if (locked) {
+                        updateRGBLED(0, 0, 255); // Solid Blue when Locked
+                    } else if (state == "EXPIRING") {
+                        updateRGBLED((loopTicks / 5) % 2 == 0 ? 255 : 0, (loopTicks / 5) % 2 == 0 ? 120 : 0, 0);
+                    } else if (tilt <= TILT_WARN_DEG) {
+                        updateRGBLED(0, 255, 0); // Solid Green when Active/Unlocked
+                    }
+                } else {
+                    updateRGBLED(0, 0, 0); // Off
+                }
             }
 
-            // Reflect power and lock states on actuators
+            // Reflect power and lock states on relays
             if (power) {
                 setPowerRelay(true);
                 setMotionRelay(!locked);
-                if (locked) {
-                    if (!tamperAlarmLatched) updateRGBLED(0, 0, 255);
-                } else if (state == "EXPIRING") {
-                    // yellow flashing
-                } else if (tilt <= TILT_WARN_DEG) {
-                    updateRGBLED(0, 255, 0); // Green for Active/Unlocked
-                }
             } else {
                 setPowerRelay(false);
                 setMotionRelay(false);
-                updateRGBLED(0, 0, 0); // Off
             }
         }
 

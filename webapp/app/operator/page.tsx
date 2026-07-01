@@ -330,11 +330,23 @@ export default function OperatorPage() {
                       {/* Motor Temperature */}
                       <div className="bg-zinc-900/40 p-3 rounded-xl border border-zinc-900/60 flex flex-col justify-between min-h-[64px] hover:border-zinc-800 transition-all">
                         <div className="flex items-center justify-between text-zinc-500">
-                          <span className="text-[10px] uppercase font-bold tracking-wider">Motor</span>
+                          <span className="text-[10px] uppercase font-bold tracking-wider">Motor Temp</span>
                           <Thermometer className="w-3.5 h-3.5 text-orange-400" />
                         </div>
                         <div className="font-extrabold text-zinc-100 text-sm mt-1.5 flex items-baseline gap-0.5">
                           {selectedChair.temp_motor.toFixed(1)}
+                          <span className="text-[9px] font-normal text-zinc-500">°C</span>
+                        </div>
+                      </div>
+
+                      {/* Battery Temperature */}
+                      <div className="bg-zinc-900/40 p-3 rounded-xl border border-zinc-900/60 flex flex-col justify-between min-h-[64px] hover:border-zinc-800 transition-all">
+                        <div className="flex items-center justify-between text-zinc-500">
+                          <span className="text-[10px] uppercase font-bold tracking-wider">Battery Temp</span>
+                          <Thermometer className="w-3.5 h-3.5 text-rose-400" />
+                        </div>
+                        <div className="font-extrabold text-zinc-100 text-sm mt-1.5 flex items-baseline gap-0.5">
+                          {selectedChair.temp_batt !== undefined && selectedChair.temp_batt !== null ? selectedChair.temp_batt.toFixed(1) : '25.0'}
                           <span className="text-[9px] font-normal text-zinc-500">°C</span>
                         </div>
                       </div>
