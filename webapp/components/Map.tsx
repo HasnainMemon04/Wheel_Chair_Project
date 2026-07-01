@@ -152,7 +152,9 @@ export default function Map({ deviceStates, selectedId, onSelectDevice }: MapPro
         const gfRadius = geofence?.r || 300;
 
         if (geofence && geofence.on === 1) {
-          geofenceCircle = L.circle([lat, lng], {
+          const gfCenterLat = (geofence as any)?.lat !== undefined ? (geofence as any).lat : lat;
+          const gfCenterLng = (geofence as any)?.lng !== undefined ? (geofence as any).lng : lng;
+          geofenceCircle = L.circle([gfCenterLat, gfCenterLng], {
             radius: gfRadius,
             color: isBreached ? '#ef4444' : '#3b82f6',
             fillColor: isBreached ? '#ef4444' : '#3b82f6',
@@ -192,12 +194,28 @@ export default function Map({ deviceStates, selectedId, onSelectDevice }: MapPro
         existing.marker.setPopupContent(popupContent);
 
         // Update geofence overlay properties
+        const gfRadius = geofence?.r || 300;
         if (existing.circle) {
           existing.circle.setStyle({
             color: isBreached ? '#ef4444' : '#3b82f6',
             fillColor: isBreached ? '#ef4444' : '#3b82f6',
             fillOpacity: isBreached ? 0.12 : 0.04,
           });
+          const gfCenterLat = (geofence as any)?.lat !== undefined ? (geofence as any).lat : lat;
+          const gfCenterLng = (geofence as any)?.lng !== undefined ? (geofence as any).lng : lng;
+          existing.circle.setLatLng([gfCenterLat, gfCenterLng]);
+          existing.circle.setRadius(gfRadius);
+        } else if (geofence && geofence.on === 1) {
+          const gfCenterLat = (geofence as any)?.lat !== undefined ? (geofence as any).lat : lat;
+          const gfCenterLng = (geofence as any)?.lng !== undefined ? (geofence as any).lng : lng;
+          existing.circle = L.circle([gfCenterLat, gfCenterLng], {
+            radius: gfRadius,
+            color: isBreached ? '#ef4444' : '#3b82f6',
+            fillColor: isBreached ? '#ef4444' : '#3b82f6',
+            fillOpacity: isBreached ? 0.12 : 0.04,
+            weight: 1.5,
+            dashArray: '4, 4'
+          }).addTo(map);
         }
 
         // Animate marker transition (60fps interpolation loop)

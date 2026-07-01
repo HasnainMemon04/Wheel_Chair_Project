@@ -260,6 +260,8 @@ void uploadTelemetryTask(void *pvParameters) {
             gfObj["in"] = localData.gf.inside ? 1 : 0;
             gfObj["dist"] = localData.gf.dist_m;
             gfObj["r"] = localData.gf.radius_m;
+            gfObj["lat"] = localData.gf.center_lat;
+            gfObj["lng"] = localData.gf.center_lng;
 
             String jsonPayload;
             serializeJson(doc, jsonPayload);

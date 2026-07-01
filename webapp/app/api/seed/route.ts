@@ -48,7 +48,7 @@ export async function POST() {
         time_left: 0,
         speed_limit: 6,
         over_speed: false,
-        geofence: { on: 1, in: 1, dist: 0, r: 300 }
+        geofence: { on: 1, in: 1, dist: 0, r: 300, lat: 24.860048, lng: 67.063734 }
       });
 
     if (sError) throw sError;
