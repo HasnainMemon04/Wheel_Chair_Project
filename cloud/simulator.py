@@ -28,7 +28,7 @@ print(f"  Target URL: {SUPABASE_URL.rstrip('/')}")
 print("  Interactive commands available:")
 print("    temp <c>     - Set motor temperature")
 print("    tilt <deg>   - Set tilt angle")
-print("    vib          - Trigger single vibration tick")
+print("    tamp         - Tamper/shake a LOCKED chair (SW-520D); 4th = siren")
 print("    occupy <1/0> - Set seat occupancy status")
 print("    speed <kmh>  - Set speed limit override")
 print("    gf <1/0>     - Toggle geofence inside/outside")
@@ -38,13 +38,13 @@ print("=================================================")
 # Simulation physical inputs (changed interactively)
 sim_temp_motor = 38.5
 sim_tilt = 1.0
-sim_vib_active = False
+sim_tamper_hit = False   # one-shot: a tamper disturbance (shake) just happened
 sim_occupied = True
 sim_speed = 4.0
 sim_gf_inside_mock = True
 
 def stdin_thread():
-    global sim_temp_motor, sim_tilt, sim_vib_active, sim_occupied, sim_speed, sim_gf_inside_mock
+    global sim_temp_motor, sim_tilt, sim_tamper_hit, sim_occupied, sim_speed, sim_gf_inside_mock
     while True:
         try:
             line = sys.stdin.readline().strip()
@@ -60,9 +60,9 @@ def stdin_thread():
                 t = float(parts[1])
                 sim_tilt = t
                 print(f"[Sim Input] Set tilt to {t}°")
-            elif cmd == "vib":
-                sim_vib_active = True
-                print("[Sim Input] Triggered vibration tick")
+            elif cmd == "tamp":
+                sim_tamper_hit = True
+                print("[Sim Input] Tamper disturbance (only counts while LOCKED)")
             elif cmd == "occupy" and len(parts) > 1:
                 sim_occupied = int(parts[1]) == 1
                 print(f"[Sim Input] Set seat occupancy to {sim_occupied}")
@@ -75,13 +75,13 @@ def stdin_thread():
             elif cmd == "clear":
                 sim_temp_motor = 38.5
                 sim_tilt = 1.0
-                sim_vib_active = False
+                sim_tamper_hit = False
                 sim_occupied = True
                 sim_speed = 4.0
                 sim_gf_inside_mock = True
                 print("[Sim Input] Reset all sensors to normal states.")
             else:
-                print("[Sim Input] Unknown command. Use: temp <val>, tilt <val>, vib, occupy <1/0>, speed <val>, gf <1/0>, clear")
+                print("[Sim Input] Unknown command. Use: temp <val>, tilt <val>, tamp, occupy <1/0>, speed <val>, gf <1/0>, clear")
         except Exception as e:
             print(f"Error reading input: {e}")
 
@@ -110,12 +110,12 @@ tilt_warn_latched = False
 geofence_exit_latched = False
 overspeed_ticks = 0
 
-# Tamper Detection
-vibration_tick_history = [0] * 6
-vibration_history_idx = 0
-tamper_siren_ticks = 0
+# Anti-tamper (SW-520D), mirrors firmware: armed while LOCKED. 3 warning chirps,
+# the 4th disturbance latches a continuous siren until CLEAR_TAMPER.
+TAMPER_ALARM_AT = 4
+tamper_warn_count = 0
+tamper_alarm_latched = False
 tamper_event_reported = False
-last_vibration_tick = 0
 
 def calculate_hmac(payload: str, key: str) -> str:
     return hmac.new(key.encode('utf-8'), payload.encode('utf-8'), hashlib.sha256).hexdigest()
@@ -149,6 +149,7 @@ def report_safety_event(event_type: str, detail_dict: dict):
 
 def poll_and_execute_commands():
     global sim_power, sim_locked, sim_session_state, sim_speed_limit, sim_geofence_r, sim_time_left, sim_ending_ticks
+    global tamper_warn_count, tamper_alarm_latched, tamper_event_reported
     
     query = f"device={DEVICE_ID}&status=pending"
     sig = calculate_hmac(query, DEVICE_KEY)
@@ -214,6 +215,12 @@ def poll_and_execute_commands():
                         sim_session_state = "ENDING"
                         sim_time_left = 0
                         sim_ending_ticks = 0
+                    ok = True
+                elif cmd == "CLEAR_TAMPER":
+                    tamper_alarm_latched = False
+                    tamper_warn_count = 0
+                    tamper_event_reported = False
+                    print("[Tamper] Cleared by operator/rider. Re-armed.")
                     ok = True
                 elif cmd == "SET_SPEED_LIMIT":
                     sim_speed_limit = args.get("kmh", 6)
@@ -306,49 +313,32 @@ try:
                 report_safety_event("FALL", {"tilt": sim_tilt})
         else:
             # 5. Normal Operation Supervisor (when no interlocks are active)
-            
-            # Two-tier Tamper alert checking (Armed only when LOCKED)
-            if sim_session_state == "LOCKED" and sim_power == 1:
-                if sim_vib_active:
-                    last_vibration_tick = uptime
-                    
-                    # Update rolling window list
-                    vibration_tick_history[vibration_history_idx] = uptime
-                    vibration_history_idx = (vibration_history_idx + 1) % 6
-                    
-                    # Count vibrations in rolling 3 seconds
-                    vib_count = sum(1 for t in vibration_tick_history if t > 0 and (uptime - t <= 3))
-                    
-                    if vib_count > 2: # In 1Hz loop, rolling 3s is 3 ticks, count > 2 escalates
-                        tamper_siren_ticks = 10
+
+            # Anti-tamper (SW-520D edge burst), armed only while LOCKED.
+            # Each `tamp` disturbance counts once: the first few chirp a warning,
+            # the TAMPER_ALARM_AT-th latches a continuous siren + TAMPER event.
+            if sim_session_state == "LOCKED":
+                if sim_tamper_hit and not tamper_alarm_latched:
+                    tamper_warn_count += 1
+                    if tamper_warn_count >= TAMPER_ALARM_AT:
+                        tamper_alarm_latched = True
                         if not tamper_event_reported:
                             tamper_event_reported = True
-                            report_safety_event("TAMPER", {"vibrations_in_3s": vib_count})
-                            print("[Tamper] Tier 2: Vibration threshold exceeded. Siren sounding.")
+                            report_safety_event("TAMPER", {"count": tamper_warn_count})
+                        print(f"[Tamper] ALARM! Disturbance {tamper_warn_count} — continuous siren. Awaiting CLEAR_TAMPER.")
                     else:
-                        print("[Tamper] Tier 1: Warning chirp (Vibration tick detected).")
-                    
-                    # Reset vibration trigger
-                    sim_vib_active = False
+                        print(f"[Tamper] Warning {tamper_warn_count}/{TAMPER_ALARM_AT - 1} — locked chair disturbed (chirp).")
 
-                # Seat occupancy tamper
-                if not sim_occupied:
-                    # (simulate occupied is normally true when sitting, false is empty.
-                    # Wait, FSR occupancy tamper check detects UNEXPECTED occupancy, meaning
-                    # if the seat is occupied when it should be empty, e.g. locked).
-                    # So if sim_occupied is True while LOCKED, it's a tamper!
-                    # For this, since we default sim_occupied=True, let's treat unexpected occupy=True as tamper.
-                    pass 
-
-                if tamper_siren_ticks > 0:
-                    tamper_siren_ticks -= 1
-                    print("[Tamper] Siren Alarm Sounding (Blink Red/Blue LEDs)")
-                else:
-                    if uptime - last_vibration_tick > 10:
-                        tamper_event_reported = False
+                if tamper_alarm_latched:
+                    print("[Tamper] Siren sounding (blink red/blue LEDs). Send CLEAR_TAMPER to silence.")
             else:
-                tamper_siren_ticks = 0
+                # Disarmed (unlocked / rented) — stand down and reset.
+                tamper_warn_count = 0
+                tamper_alarm_latched = False
                 tamper_event_reported = False
+
+            # Always consume the one-shot disturbance flag.
+            sim_tamper_hit = False
 
             # Geofence local check
             current_speed_limit = sim_speed_limit
@@ -453,6 +443,8 @@ try:
             "batt_v": 4.12,
             "batt_pct": 98,
             "occupied": 1 if sim_occupied else 0,
+            "tamper": 1 if tamper_alarm_latched else 0,
+            "tamper_count": tamper_warn_count,
             "rssi": -55,
             "power": sim_power,
             "locked": sim_locked,

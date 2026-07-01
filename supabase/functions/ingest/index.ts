@@ -122,6 +122,8 @@ serve(async (req) => {
           batt_v: payload.batt_v,
           batt_pct: payload.batt_pct,
           occupied: payload.occupied === 1,
+          tamper: payload.tamper === 1,
+          tamper_count: payload.tamper_count ?? 0,
           rssi: payload.rssi,
           power: payload.power === 1,
           locked: payload.locked === 1,

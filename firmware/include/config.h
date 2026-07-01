@@ -40,7 +40,26 @@
 #define DHT_TYPE           DHT22
 
 // ------------------------- Safety / tilt --------------------
-#define TILT_SWITCH_PIN    14   // SW-520D (tilt detection)
+#define TILT_SWITCH_PIN    14   // SW-520D (tilt detection + anti-tamper)
+
+// ------------------------- Anti-tamper (SW-520D) ------------
+// Edge-counting tamper detection, ported from the hardware_test_lab
+// tamper_detection_sw520d.ino sketch. Armed only while the chair is LOCKED.
+// A single bump makes 1-2 edges (ignored); real handling/shaking makes a
+// burst of edges (the tilt ball keeps re-triggering) and counts as tamper.
+#define TAMPER_EDGE_DEBOUNCE_MS  15    // filters pure electrical contact noise
+#define TAMPER_EDGE_WINDOW_MS    700   // window edges are counted within
+#define TAMPER_EDGE_THRESHOLD    4     // edges in the window => one tamper event
+#define TAMPER_MAX_EDGE_BUFFER   20    // ring buffer size for edge timestamps
+#define TAMPER_REFRACTORY_MS     1500  // min gap between counted tamper events
+#define TAMPER_ALARM_AT          4     // 3 warning chirps, 4th => continuous siren
+
+// Secondary tamper trigger via MPU6050 (works even if the SW-520D is faulty).
+// A locked/parked chair is stationary; lifting/pushing produces linear
+// acceleration and rotating/tilting it produces gyro rate — either crossing
+// its threshold counts as one disturbance (same 3-warn / 4th-siren escalation).
+#define TAMPER_MPU_ACCEL_THRESH  2.5f  // m/s^2 deviation from 1g (~0.25g) = shove/lift/shake
+#define TAMPER_MPU_GYRO_THRESH   30.0f // deg/s rotation rate = tilting/turning the chair
 
 // ------------------------- Power sense ----------------------
 // TODO: Battery voltage sense is untested on bench

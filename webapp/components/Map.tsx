@@ -97,11 +97,14 @@ export default function Map({ deviceStates, selectedId, onSelectDevice }: MapPro
 
       // Determine state colors
       const isBreached = geofence ? geofence.in === 0 : false;
-      const themeColor = !online 
+      const isTampered = !!device.tamper;
+      const themeColor = !online
         ? '#9ca3af' // gray
-        : isBreached 
+        : isTampered
+        ? '#ef4444' // red if tamper alarm
+        : isBreached
         ? '#ef4444' // red if geofence breached
-        : locked 
+        : locked
         ? '#3b82f6' // blue if locked
         : '#10b981'; // green if active/unlocked
 
@@ -134,7 +137,7 @@ export default function Map({ deviceStates, selectedId, onSelectDevice }: MapPro
           <div class="p-1">
             <h3 class="font-bold text-sm text-foreground">${wheelchair_id}</h3>
             <p class="text-xs text-muted-foreground mt-0.5">Status: <span class="font-medium" style="color: ${themeColor}">${
-              !online ? 'Offline' : isBreached ? 'Breached' : locked ? 'Locked' : 'Active'
+              !online ? 'Offline' : isTampered ? 'Tamper Alarm' : isBreached ? 'Breached' : locked ? 'Locked' : 'Active'
             }</span></p>
             <p class="text-xs text-muted-foreground">Battery: ${device.batt_pct}% (${device.batt_v.toFixed(2)}V)</p>
           </div>
@@ -186,7 +189,7 @@ export default function Map({ deviceStates, selectedId, onSelectDevice }: MapPro
           <div class="p-1">
             <h3 class="font-bold text-sm text-foreground">${wheelchair_id}</h3>
             <p class="text-xs text-muted-foreground mt-0.5">Status: <span class="font-medium" style="color: ${themeColor}">${
-              !online ? 'Offline' : isBreached ? 'Breached' : locked ? 'Locked' : 'Active'
+              !online ? 'Offline' : isTampered ? 'Tamper Alarm' : isBreached ? 'Breached' : locked ? 'Locked' : 'Active'
             }</span></p>
             <p class="text-xs text-muted-foreground">Battery: ${device.batt_pct}% (${device.batt_v.toFixed(2)}V)</p>
           </div>

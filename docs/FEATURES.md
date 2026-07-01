@@ -20,10 +20,15 @@ Each feature lists: **inputs**, **behavior**, **outputs/actions**, and **accepta
   `temp_batt` > **HOT threshold** (default 70 °C) → **over-temp interlock**: cut CH1 power,
   siren, `OVERTEMP` event. Auto-clear only when temp falls below a hysteresis band.
 - **Outputs:** telemetry `temp_motor/temp_batt/temp_amb/humidity`; `OVERTEMP` event.
+- **Ambient climate (DHT22):** the website surfaces `temp_amb` + `humidity` and derives dew
+  point (Magnus-Tetens), heat index / "feels-like" (NOAA Rothfusz), and a comfort/hydration
+  tip using the exact formulas from `hardware_test_lab/dht_test/dht_test.ino` (see
+  `webapp/utils/climate.ts`), shown in the Ambient Climate card on the rider & operator views.
 - **Acceptance:**
   - Both probes report distinct values addressed by ROM ID.
   - Heating a probe past threshold cuts power and raises an event within 3 s.
   - Power does not auto-restore until temp < (threshold − hysteresis).
+  - The website shows live ambient temp/humidity with derived dew point, feels-like, and comfort.
 
 ## F4 — GPS Tracking & Geofencing
 - **Inputs:** NEO-6M (lat, lng, speed, sats, HDOP); geofence config (center, radius) via `cmd`.
@@ -69,13 +74,20 @@ Each feature lists: **inputs**, **behavior**, **outputs/actions**, and **accepta
   - SW-520D independently confirms a hard tip-over (redundancy).
 
 ## F10 — Tamper Detection
-- **Inputs:** SW-420 vibration, MPU6050 motion, FSR occupancy, relay/lock state.
-- **Behavior:** **armed only when LOCKED.** If the chair is locked and detects sustained
-  vibration, displacement (MPU6050), or unexpected occupancy (FSR) → siren + `TAMPER` event
-  + push notification to operator. Disarmed automatically when a valid session starts.
-- **Outputs:** `TAMPER` event with cause; buzzer siren.
+- **Inputs:** SW-520D tilt switch (GPIO 14, edge counting), relay/lock/session state.
+- **Behavior:** **armed only when LOCKED.** The SW-520D interrupt records tilt-switch edges;
+  a single bump makes 1-2 edges (ignored), while real handling/shaking of the parked chair
+  makes a burst (`TAMPER_EDGE_THRESHOLD` edges within `TAMPER_EDGE_WINDOW_MS`) that counts as
+  one disturbance. The first 3 disturbances each sound a short **warning chirp**; the **4th**
+  (`TAMPER_ALARM_AT`) latches a **continuous siren**, reports a `TAMPER` event, and raises the
+  alarm overlay on the website. The alarm clears on `CLEAR_TAMPER` (operator/rider "Silence
+  Alarm & Re-arm") or automatically when the chair is unlocked/rented. Logic is ported from
+  `hardware_test_lab/tamper_detection_sw520d.ino`.
+- **Outputs:** `tamper` + `tamper_count` telemetry; `TAMPER` event; buzzer siren; website
+  alarm overlay with turn-off control.
 - **Acceptance:**
-  - While LOCKED, shaking/moving the chair triggers a tamper alarm + operator notification.
+  - While LOCKED, shaking/moving the chair chirps 3 warnings, then sirens continuously on the
+    4th and shows the operator/rider a dismissible alarm.
   - While ACTIVE (rented), normal use does **not** trigger tamper.
 
 ## F12 — OTA Firmware/Software Updates

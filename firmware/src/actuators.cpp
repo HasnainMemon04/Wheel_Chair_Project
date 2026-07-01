@@ -23,12 +23,14 @@ static bool tiltWarnLatched = false;
 static bool geofenceExitLatched = false;
 static int overspeedTicks = 0;
 
-// Tamper detection states (SW-420 and FSR removed, keep variables to avoid compilation errors)
-static uint32_t vibrationTickHistory[6] = {0};
-static int vibrationHistoryIdx = 0;
-static int tamperSirenTicks = 0;
-static bool tamperEventReported = false;
-static uint32_t lastVibrationTick = 0;
+// Anti-tamper detection (SW-520D edge counting). Armed only while LOCKED.
+// 3 disturbances => warning chirps; the 4th latches a continuous siren until
+// an operator/rider sends CLEAR_TAMPER (or the chair is unlocked/rented).
+static int  tamperWarnCount = 0;
+static bool tamperAlarmLatched = false;
+static bool tamperReported = false;
+static bool tamperArmed = false;
+static unsigned long lastTamperEventMs = 0;
 
 void initActuators() {
     pinMode(RELAY_POWER_PIN, OUTPUT);
@@ -127,6 +129,16 @@ void triggerManualSOS() {
 void clearManualSOS() {
     manualSOSLatched = false;
     manualSOSReported = false;
+}
+
+// Anti-tamper acknowledgement (CLEAR_TAMPER command from operator/rider).
+// Silences the siren, resets the warning count, and re-arms cleanly.
+void clearTamper() {
+    tamperAlarmLatched = false;
+    tamperWarnCount = 0;
+    tamperReported = false;
+    resetTamperEdges();
+    Serial.println("[Tamper] Cleared by operator/rider acknowledgment. Re-armed.");
 }
 
 // Safety Supervisor Task running at 20 Hz
@@ -248,17 +260,59 @@ void safetySupervisorTask(void *pvParameters) {
         } else {
             // Normal Operating Mode (No active interlocks)
             
-            // Turn off continuous siren pin driving if not warning-beeping
-            if (buzzerBeepTicks <= 0) {
+            // Turn off continuous siren pin driving if not warning-beeping and
+            // not in a latched tamper alarm.
+            if (buzzerBeepTicks <= 0 && !tamperAlarmLatched) {
                 buzzerWrite(false);
             }
 
             // Local 1-second timer tick (runs once per second = 20 ticks)
             bool tickSecond = (loopTicks % 20 == 0);
 
-            // Tamper detection checks (deactivated since SW-420 and FSR sensors are physically removed)
-            tamperSirenTicks = 0;
-            tamperEventReported = false;
+            // ---- Anti-tamper security (SW-520D), armed only while LOCKED ----
+            // While the chair is locked, a burst of tilt-switch edges means
+            // someone is moving/shaking it. Each burst counts as one disturbance:
+            // the first few are warning chirps, the TAMPER_ALARM_AT-th latches a
+            // continuous siren and reports a TAMPER event to the cloud.
+            // Armed whenever the chair is locked/parked (independent of the motor
+            // power relay — the ESP32 + buzzer run on aux power, so a locked chair
+            // that was powered off is still guarded against theft/tampering).
+            bool tamperArmedNow = (locked && state == "LOCKED");
+            if (tamperArmedNow) {
+                if (!tamperArmed) {
+                    // Just armed — drop stale pre-lock edges so handing the chair
+                    // over / locking it doesn't immediately trip the alarm.
+                    tamperArmed = true;
+                    resetTamperEdges();
+                }
+                unsigned long nowMs = millis();
+                if (!tamperAlarmLatched &&
+                    tamperRecentEdges(nowMs) >= TAMPER_EDGE_THRESHOLD &&
+                    (nowMs - lastTamperEventMs) > TAMPER_REFRACTORY_MS) {
+                    lastTamperEventMs = nowMs;
+                    resetTamperEdges();          // consume this burst; count discrete events
+                    tamperWarnCount++;
+                    if (tamperWarnCount >= TAMPER_ALARM_AT) {
+                        tamperAlarmLatched = true;
+                        if (!tamperReported) {
+                            tamperReported = true;
+                            reportSafetyEvent("TAMPER", "{\"count\":" + String(tamperWarnCount) + "}");
+                        }
+                        Serial.printf("[Tamper] ALARM! Disturbance %d — continuous siren. Awaiting CLEAR_TAMPER.\n", tamperWarnCount);
+                    } else {
+                        buzzerBeepTicks = 3;     // simple ~150ms warning chirp
+                        Serial.printf("[Tamper] Warning %d/%d — locked chair disturbed.\n",
+                                      tamperWarnCount, TAMPER_ALARM_AT - 1);
+                    }
+                }
+            } else {
+                // Disarmed (unlocked / rented / powered off) — stand down and reset.
+                if (tamperArmed) resetTamperEdges();
+                tamperArmed = false;
+                tamperWarnCount = 0;
+                tamperAlarmLatched = false;
+                tamperReported = false;
+            }
 
             // Overspeed interlock & warning check (Rider state only)
             if ((state == "ACTIVE" || state == "EXPIRING") && power && !locked) {
@@ -392,14 +446,22 @@ void safetySupervisorTask(void *pvParameters) {
             sharedTelemetry.session_state = state;
             sharedTelemetry.time_left_s = timeLeft;
             sharedTelemetry.locked_state = locked;
+            sharedTelemetry.tamper_alarm = tamperAlarmLatched;
+            sharedTelemetry.tamper_warn_count = tamperWarnCount;
             xSemaphoreGive(stateMutex);
+
+            // Latched tamper alarm: continuous siren + fast red/blue LED flash.
+            if (tamperAlarmLatched) {
+                buzzerWrite(true);
+                updateRGBLED((loopTicks / 3) % 2 == 0 ? 255 : 0, 0, (loopTicks / 3) % 2 == 0 ? 0 : 255);
+            }
 
             // Reflect power and lock states on actuators
             if (power) {
                 setPowerRelay(true);
                 setMotionRelay(!locked);
                 if (locked) {
-                    if (tamperSirenTicks <= 0) updateRGBLED(0, 0, 255);
+                    if (!tamperAlarmLatched) updateRGBLED(0, 0, 255);
                 } else if (state == "EXPIRING") {
                     // yellow flashing
                 } else if (tilt <= TILT_WARN_DEG) {

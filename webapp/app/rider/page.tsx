@@ -6,10 +6,11 @@ import dynamic from 'next/dynamic';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useFleetState, DeviceState } from '../../hooks/useFleetState';
 import { supabase } from '../../utils/supabase';
-import { 
-  MapPin, Battery, ShieldAlert, Zap, Clock, CreditCard, 
-  PlusCircle, CheckCircle2, Lock, AlertTriangle, XCircle 
+import {
+  MapPin, Battery, ShieldAlert, Zap, Clock, CreditCard,
+  PlusCircle, CheckCircle2, Lock, AlertTriangle, XCircle, ShieldOff
 } from 'lucide-react';
+import ClimateCard from '../../components/ClimateCard';
 
 // Dynamically import Leaflet Map to avoid Next.js SSR "window is not defined" crashes
 const Map = dynamic(() => import('../../components/Map'), {
@@ -505,6 +506,15 @@ export default function RiderPage() {
             )}
           </div>
 
+          {/* Ambient climate for the contextual chair (rented or selected) */}
+          {(rentedChair || selectedChair) && (
+            <ClimateCard
+              tempC={(rentedChair || selectedChair)!.temp_amb}
+              humidity={(rentedChair || selectedChair)!.humidity}
+              compact
+            />
+          )}
+
           {/* Rent Box for Selected Chair */}
           <AnimatePresence mode="wait">
             {selectedChair && !activeRental && (
@@ -714,6 +724,34 @@ export default function RiderPage() {
                 Call Red Crescent
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Anti-Tamper Alarm Overlay (your locked chair is being moved) */}
+      {rentedChair && rentedChair.tamper && rentedChair.session_state !== 'SAFE_FAULT' && (
+        <div className="fixed inset-0 bg-[#09090b]/85 backdrop-blur-md z-[9999] flex items-center justify-center p-4">
+          <div className="bg-zinc-950 border border-red-500/40 p-6 rounded-2xl max-w-sm w-full space-y-4 shadow-2xl text-center">
+            <div className="w-16 h-16 rounded-full bg-red-500/10 border border-red-500/25 flex items-center justify-center mx-auto text-red-500">
+              <ShieldOff className="w-8 h-8 animate-pulse" />
+            </div>
+            <div className="space-y-1">
+              <h2 className="text-lg font-black text-red-500 uppercase tracking-wider">Tamper Alarm</h2>
+              <p className="text-zinc-400 text-xs font-semibold">
+                Your locked wheelchair is being moved or tampered with.
+              </p>
+            </div>
+            <div className="bg-zinc-900 p-3 rounded-lg border border-zinc-800 text-xs font-mono text-zinc-300">
+              <div className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider mb-1">Continuous Siren Active</div>
+              {rentedChair.tamper_count} disturbance{rentedChair.tamper_count === 1 ? '' : 's'} detected
+            </div>
+            <button
+              onClick={() => triggerRiderCommand('CLEAR_TAMPER')}
+              className="w-full py-2.5 bg-red-600 hover:bg-red-500 text-white font-bold rounded-lg text-xs transition-all cursor-pointer uppercase tracking-wider flex items-center justify-center gap-1.5"
+            >
+              <ShieldOff className="w-4 h-4" />
+              Silence Alarm & Re-arm
+            </button>
           </div>
         </div>
       )}

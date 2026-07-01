@@ -31,6 +31,7 @@ create table if not exists device_state (
   pitch real, roll real, tilt real,
   temp_motor real, temp_batt real, temp_amb real, humidity real,
   batt_v real, batt_pct int, occupied boolean, rssi int,
+  tamper boolean default false, tamper_count int default 0,
   power boolean, locked boolean,
   session_state text, time_left int, speed_limit int, over_speed boolean,
   geofence jsonb
@@ -45,6 +46,10 @@ create table if not exists telemetry_history (
   data          jsonb not null
 );
 create index if not exists idx_hist_chair_ts on telemetry_history (wheelchair_id, ts desc);
+
+-- Anti-tamper columns (idempotent — safe to re-run on an already-deployed DB).
+alter table device_state add column if not exists tamper       boolean default false;
+alter table device_state add column if not exists tamper_count int default 0;
 
 create table if not exists events (
   id            bigserial primary key,

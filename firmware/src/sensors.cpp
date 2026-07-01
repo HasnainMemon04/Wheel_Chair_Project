@@ -28,10 +28,72 @@ bool dsOK = false;
 DeviceAddress motorAddress, battAddress;
 
 // Complementary filter variables
-const float alpha = 0.96f; 
+const float alpha = 0.96f;
 float filterPitch = 0.0f;
 float filterRoll = 0.0f;
 unsigned long lastIMUTime = 0;
+
+// ---------------- Anti-tamper edge counter (SW-520D) ----------------
+// Ring buffer of recent tilt-switch edge timestamps, filled by the ISR.
+// Ported from hardware_test_lab/tamper_detection_sw520d.ino.
+static volatile unsigned long tamperEdgeTimestamps[TAMPER_MAX_EDGE_BUFFER];
+static volatile int tamperEdgeHead = 0;
+static volatile int tamperEdgeCountTotal = 0;
+static volatile uint32_t tamperEdgeCountEver = 0; // diagnostic, never reset
+static volatile unsigned long tamperLastEdgeMillis = 0;
+
+void IRAM_ATTR onTiltSwitchChange() {
+    unsigned long now = millis();
+    // Minimal debounce: filters only true electrical contact chatter (<15ms),
+    // NOT the real mechanical bounce produced by genuine shaking/movement.
+    if (now - tamperLastEdgeMillis >= TAMPER_EDGE_DEBOUNCE_MS) {
+        tamperEdgeTimestamps[tamperEdgeHead] = now;
+        tamperEdgeHead = (tamperEdgeHead + 1) % TAMPER_MAX_EDGE_BUFFER;
+        tamperEdgeCountTotal++;
+        tamperEdgeCountEver++;
+        tamperLastEdgeMillis = now;
+    }
+}
+
+// Count how many recorded edges fall within the last TAMPER_EDGE_WINDOW_MS.
+int tamperRecentEdges(unsigned long now) {
+    int count = 0;
+    noInterrupts();
+    int total = tamperEdgeCountTotal;
+    int samples = total < TAMPER_MAX_EDGE_BUFFER ? total : TAMPER_MAX_EDGE_BUFFER;
+    int idx = tamperEdgeHead;
+    unsigned long snapshot[TAMPER_MAX_EDGE_BUFFER];
+    for (int i = 0; i < samples; i++) {
+        idx = (idx - 1 + TAMPER_MAX_EDGE_BUFFER) % TAMPER_MAX_EDGE_BUFFER;
+        snapshot[i] = tamperEdgeTimestamps[idx];
+    }
+    interrupts();
+
+    for (int i = 0; i < samples; i++) {
+        if (now - snapshot[i] <= TAMPER_EDGE_WINDOW_MS) {
+            count++;
+        } else {
+            break; // timestamps are in descending recency order
+        }
+    }
+    return count;
+}
+
+// Clear edge history so stale bumps can't trip a fresh alert (call on arm).
+void resetTamperEdges() {
+    noInterrupts();
+    tamperEdgeCountTotal = 0;
+    tamperEdgeHead = 0;
+    interrupts();
+}
+
+// Cumulative edge count that is never reset (diagnostic: proves the ISR fires).
+uint32_t tamperTotalEdges() {
+    noInterrupts();
+    uint32_t v = tamperEdgeCountEver;
+    interrupts();
+    return v;
+}
 
 void initSensors() {
     stateMutex = xSemaphoreCreateMutex();
@@ -57,6 +119,8 @@ void initSensors() {
     sharedTelemetry.occupied = false;
     sharedTelemetry.tilt_switch_state = false;
     sharedTelemetry.vibration_state = false;
+    sharedTelemetry.tamper_alarm = false;
+    sharedTelemetry.tamper_warn_count = 0;
     sharedTelemetry.wifi_rssi = -100;
     sharedTelemetry.power_state = true;
     sharedTelemetry.locked_state = true; // Fail-safe default
@@ -129,6 +193,11 @@ void initSensors() {
 
     // Pin Modes
     pinMode(TILT_SWITCH_PIN, INPUT_PULLUP);
+    // Attach the anti-tamper edge-counting ISR to the SW-520D tilt switch.
+    // The same pin is still polled (debounced) in sensorPollTask for the fall
+    // backup; the interrupt just additionally records edges for tamper bursts.
+    attachInterrupt(digitalPinToInterrupt(TILT_SWITCH_PIN), onTiltSwitchChange, CHANGE);
+    resetTamperEdges();
     // ADC pins do not strictly require pinMode, but we set them
     pinMode(BATT_ADC_PIN, INPUT);
 }
@@ -141,7 +210,13 @@ void gpsTask(void *pvParameters) {
     unsigned long lastSimulateTime = 0;
     double simLat = 24.860048;
     double simLng = 67.063734;
-    
+
+    // Track when we last saw a VALID hardware fix. If the real GPS goes silent or loses
+    // its fix for longer than this, we clear gps_fix so simulation resumes (fixes the
+    // "stuck on last real coordinate after GPS desync" bug).
+    unsigned long lastHardwareFixTime = 0;
+    const unsigned long GPS_FIX_TIMEOUT_MS = 10000; // 10s without a valid fix => lost
+
     while (true) {
         while (GPSSerial.available() > 0) {
             gps.encode(GPSSerial.read());
@@ -152,6 +227,7 @@ void gpsTask(void *pvParameters) {
         if (gps.location.isUpdated()) {
             if (gps.location.isValid()) {
                 hasHardwareFix = true;
+                lastHardwareFixTime = millis();
                 double lat = gps.location.lat();
                 double lng = gps.location.lng();
                 
@@ -170,6 +246,28 @@ void gpsTask(void *pvParameters) {
                     sharedTelemetry.gf.inside = (dist <= sharedTelemetry.gf.radius_m);
                 }
                 xSemaphoreGive(stateMutex);
+            }
+        }
+
+        // If we currently believe we have a fix but haven't seen a valid one recently,
+        // declare the fix lost so the simulation path below can take over again.
+        if (!hasHardwareFix) {
+            bool fixExpired = false;
+            xSemaphoreTake(stateMutex, portMAX_DELAY);
+            if (sharedTelemetry.gps_fix &&
+                (lastHardwareFixTime == 0 || (millis() - lastHardwareFixTime) > GPS_FIX_TIMEOUT_MS)) {
+                sharedTelemetry.gps_fix = false;
+                fixExpired = true;
+            }
+            xSemaphoreGive(stateMutex);
+            if (fixExpired) {
+                Serial.println("[Sensors] GPS fix lost (timeout). Resuming simulated location.");
+                // Seed the simulator from the last known real position for a smooth handover.
+                xSemaphoreTake(stateMutex, portMAX_DELAY);
+                simLat = sharedTelemetry.gps_lat;
+                simLng = sharedTelemetry.gps_lng;
+                xSemaphoreGive(stateMutex);
+                lastSimulateTime = 0; // force an immediate simulated update
             }
         }
 

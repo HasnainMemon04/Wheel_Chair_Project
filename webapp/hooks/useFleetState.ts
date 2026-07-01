@@ -20,6 +20,8 @@ export interface DeviceState {
   batt_v: number;
   batt_pct: number;
   occupied: boolean;
+  tamper: boolean;
+  tamper_count: number;
   rssi: number;
   power: boolean;
   locked: boolean;

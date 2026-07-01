@@ -2,6 +2,7 @@
 #include "sensors.h"
 #include "actuators.h"
 #include "config.h"
+#include "wifi_portal.h"
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
@@ -11,6 +12,12 @@
 
 // Global connection state
 bool wifiConnected = false;
+
+// Active WiFi credentials (loaded from NVS, or config.h defaults, or the AP portal).
+// These replace the compile-time WIFI_SSID/WIFI_PASS at runtime so the device can be
+// re-provisioned in the field without reflashing.
+static String activeSSID;
+static String activePASS;
 
 // Shared Secure client and serialization mutex to prevent memory starvation
 WiFiClientSecure secureClient;
@@ -66,7 +73,12 @@ void initNetwork() {
     Serial.println("[Network] Initializing WiFi...");
     WiFi.mode(WIFI_MODE_STA);
     WiFi.disconnect();
-    
+
+    // Load WiFi credentials: NVS-saved first, else config.h defaults.
+    bool haveSaved = loadSavedWiFiCreds(activeSSID, activePASS);
+    Serial.printf("[Network] Using %s WiFi creds. SSID: %s\n",
+                  haveSaved ? "saved (NVS)" : "default (config.h)", activeSSID.c_str());
+
     // Disable certificate verification to save ~30KB of heap
     secureClient.setInsecure();
     
@@ -80,43 +92,76 @@ void initNetwork() {
     safetyEventQueue = xQueueCreate(5, sizeof(SafetyEvent));
 }
 
-// WiFi Monitor Task with Exponential Backoff
+// WiFi Monitor Task: connect with saved creds; after repeated failures open the
+// AP config portal ("WheelchairSetup") to capture new creds, then retry forever.
 void networkTask(void *pvParameters) {
     uint32_t backoffMs = 2000;
     const uint32_t maxBackoffMs = 60000;
 
+    // How long to keep failing before we open the AP config portal.
+    // Each connect attempt below waits up to 10s, so ~3 failed attempts ≈ 30s.
+    const int failuresBeforePortal = 3;
+    int consecutiveFailures = 0;
+
     Serial.println("[Tasks] WiFi Task started.");
-    
+
     while (true) {
         if (WiFi.status() != WL_CONNECTED) {
             wifiConnected = false;
-            Serial.printf("[Network] WiFi not connected. Connecting to SSID: %s...\n", WIFI_SSID);
-            WiFi.begin(WIFI_SSID, WIFI_PASS);
-            
+            Serial.printf("[Network] WiFi not connected. Connecting to SSID: %s...\n", activeSSID.c_str());
+            WiFi.mode(WIFI_STA);
+            WiFi.begin(activeSSID.c_str(), activePASS.c_str());
+
             // Wait up to 10s for connection
             int retries = 0;
             while (WiFi.status() != WL_CONNECTED && retries < 20) {
                 vTaskDelay(pdMS_TO_TICKS(500));
                 retries++;
             }
-            
+
             if (WiFi.status() == WL_CONNECTED) {
                 wifiConnected = true;
-                backoffMs = 2000; // Reset backoff
+                backoffMs = 2000;            // Reset backoff
+                consecutiveFailures = 0;     // Reset failure counter
                 Serial.printf("[Network] Connected! IP: %s\n", WiFi.localIP().toString().c_str());
             } else {
-                Serial.printf("[Network] Connection failed. Backing off for %d ms...\n", backoffMs);
-                vTaskDelay(pdMS_TO_TICKS(backoffMs));
-                backoffMs = min(backoffMs * 2, maxBackoffMs);
+                consecutiveFailures++;
+                Serial.printf("[Network] Connection failed (%d/%d).\n",
+                              consecutiveFailures, failuresBeforePortal);
+
+                // After ~30s of failure, open the AP portal to re-provision.
+                if (consecutiveFailures >= failuresBeforePortal) {
+                    Serial.println("[Network] Repeated failures. Opening WiFi setup portal...");
+                    Serial.println("[Network] Uploads paused; sensors & safety keep running.");
+
+                    // Blocking portal: runs until the user submits new credentials.
+                    // Sensors/safety tasks keep running on their own cores/tasks.
+                    bool got = startConfigPortal(0);   // 0 = wait indefinitely
+
+                    if (got) {
+                        // Reload the freshly-saved credentials and try again immediately.
+                        loadSavedWiFiCreds(activeSSID, activePASS);
+                        Serial.printf("[Network] New creds loaded. Reconnecting to SSID: %s...\n",
+                                      activeSSID.c_str());
+                    }
+
+                    consecutiveFailures = 0;
+                    backoffMs = 2000;
+                    // Loop straight back to a connect attempt with the new creds.
+                } else {
+                    Serial.printf("[Network] Backing off for %d ms...\n", backoffMs);
+                    vTaskDelay(pdMS_TO_TICKS(backoffMs));
+                    backoffMs = min(backoffMs * 2, maxBackoffMs);
+                }
             }
         } else {
             wifiConnected = true;
-            
+
             // Update RSSI in telemetry
             xSemaphoreTake(stateMutex, portMAX_DELAY);
             sharedTelemetry.wifi_rssi = WiFi.RSSI();
             xSemaphoreGive(stateMutex);
-            
+
             vTaskDelay(pdMS_TO_TICKS(5000)); // Check link status every 5s
         }
     }
@@ -211,7 +256,7 @@ void uploadTelemetryTask(void *pvParameters) {
     int lastUploadCode = -1;
     
     while (true) {
-        if (wifiConnected) {
+        if (wifiConnected && !isPortalActive()) {
             // Drain safety event queue first using our single-conn path
             SafetyEvent pendingEv;
             while (safetyEventQueue != NULL && xQueueReceive(safetyEventQueue, &pendingEv, 0) == pdTRUE) {
@@ -247,6 +292,8 @@ void uploadTelemetryTask(void *pvParameters) {
             doc["batt_v"] = localData.batt_v;
             doc["batt_pct"] = localData.batt_pct;
             doc["occupied"] = localData.occupied ? 1 : 0;
+            doc["tamper"] = localData.tamper_alarm ? 1 : 0;
+            doc["tamper_count"] = localData.tamper_warn_count;
             doc["rssi"] = localData.wifi_rssi;
             doc["power"] = localData.power_state ? 1 : 0;
             doc["locked"] = localData.locked_state ? 1 : 0;
@@ -282,6 +329,11 @@ void uploadTelemetryTask(void *pvParameters) {
             // 6. Lightweight once-per-second heartbeat log
             Serial.printf("[Heartbeat] Uptime: %ds | Free Heap: %d bytes | RSSI: %d | Last HTTP: %d | GPS Fix: %s\n",
                           localData.uptime_s, ESP.getFreeHeap(), localData.wifi_rssi, lastUploadCode, localData.gps_fix ? "YES" : "NO");
+            // Tamper diagnostic: raw SW-520D pin, cumulative edges, armed?, warn count, alarm.
+            Serial.printf("[TamperDbg] state:%s locked:%d | tiltPin:%d edgesEver:%u | warns:%d alarm:%d\n",
+                          localData.session_state.c_str(), localData.locked_state ? 1 : 0,
+                          digitalRead(TILT_SWITCH_PIN), tamperTotalEdges(),
+                          localData.tamper_warn_count, localData.tamper_alarm ? 1 : 0);
         }
         
         vTaskDelayUntil(&lastWakeTime, period);
@@ -402,6 +454,12 @@ void processCommands(const String &jsonResponse) {
             sharedTelemetry.session_state = "LOCKED";
             sharedTelemetry.locked_state = true;
             clearManualSOS();
+            ok = true;
+        } else if (cmd == "CLEAR_TAMPER") {
+            // Acknowledge and silence the anti-tamper alarm; chair stays LOCKED.
+            sharedTelemetry.tamper_alarm = false;
+            sharedTelemetry.tamper_warn_count = 0;
+            clearTamper();
             ok = true;
         } else if (cmd == "WARN_EXPIRY") {
             if (sharedTelemetry.session_state == "ACTIVE") {
