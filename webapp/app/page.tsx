@@ -13,21 +13,21 @@ export default function LandingPage() {
       <div className="absolute bottom-[-10%] right-[-10%] w-[50%] h-[50%] rounded-full bg-emerald-500/10 blur-[120px] pointer-events-none" />
 
       {/* Header */}
-      <header className="w-full max-w-7xl mx-auto px-6 py-6 flex justify-between items-center z-10">
+      <header className="w-full max-w-7xl mx-auto px-4 sm:px-6 py-4 sm:py-6 flex flex-wrap items-center justify-between gap-3 z-10">
         <div className="flex items-center gap-2">
           <div className="w-9 h-9 rounded-lg bg-blue-600 flex items-center justify-center font-bold text-white shadow-md shadow-blue-500/30">
             W
           </div>
-          <span className="font-extrabold text-xl tracking-tight bg-gradient-to-r from-white via-zinc-200 to-zinc-400 bg-clip-text text-transparent">
+          <span className="font-extrabold text-lg sm:text-xl tracking-tight bg-gradient-to-r from-white via-zinc-200 to-zinc-400 bg-clip-text text-transparent">
             SmartWheel
           </span>
         </div>
-        <div className="flex items-center gap-4">
-          <Link href="/rider" className="text-sm font-medium text-zinc-400 hover:text-white transition-colors">
-            Rider Area
+        <div className="flex items-center gap-2 sm:gap-4">
+          <Link href="/rider" className="text-xs sm:text-sm font-medium text-zinc-400 hover:text-white transition-colors px-2 py-1.5">
+            Rider
           </Link>
-          <Link href="/operator" className="glass px-4 py-2 rounded-lg text-sm font-semibold hover:bg-zinc-800/80 transition-all">
-            Operator Portal
+          <Link href="/operator" className="glass px-3 sm:px-4 py-1.5 sm:py-2 rounded-lg text-xs sm:text-sm font-semibold hover:bg-zinc-800/80 transition-all">
+            Operator
           </Link>
         </div>
       </header>
