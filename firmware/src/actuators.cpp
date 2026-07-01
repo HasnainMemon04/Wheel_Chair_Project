@@ -171,6 +171,7 @@ void safetySupervisorTask(void *pvParameters) {
         int speedLimit = sharedTelemetry.speed_limit_kmh;
         float speedGps = sharedTelemetry.gps_speed_kmh;
         bool tiltSwActive = sharedTelemetry.tilt_switch_state;
+        bool vibrationActive = sharedTelemetry.vibration_state;
         bool insideGf = sharedTelemetry.gf.inside;
         float gfDist = sharedTelemetry.gf.dist_m;
         float gfRadius = sharedTelemetry.gf.radius_m;
@@ -286,8 +287,11 @@ void safetySupervisorTask(void *pvParameters) {
                     resetTamperEdges();
                 }
                 unsigned long nowMs = millis();
+                bool tiltSwitchTriggered = (tamperRecentEdges(nowMs) >= TAMPER_EDGE_THRESHOLD);
+                bool imuTriggered = vibrationActive;
+
                 if (!tamperAlarmLatched &&
-                    tamperRecentEdges(nowMs) >= TAMPER_EDGE_THRESHOLD &&
+                    (tiltSwitchTriggered || imuTriggered) &&
                     (nowMs - lastTamperEventMs) > TAMPER_REFRACTORY_MS) {
                     lastTamperEventMs = nowMs;
                     resetTamperEdges();          // consume this burst; count discrete events

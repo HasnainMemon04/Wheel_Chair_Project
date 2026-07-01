@@ -337,6 +337,8 @@ void readIMU() {
     // Convert gyro rate to deg/s (MPU6050 returns rad/s)
     float gyroPitchRate = g.gyro.x * 180.0f / PI;
     float gyroRollRate = g.gyro.y * 180.0f / PI;
+    float gyroYawRate = g.gyro.z * 180.0f / PI;
+    float gyroMaxRate = max(abs(gyroPitchRate), max(abs(gyroRollRate), abs(gyroYawRate)));
 
     // Complementary filter
     filterPitch = alpha * (filterPitch + gyroPitchRate * dt) + (1.0f - alpha) * accPitch;
@@ -352,10 +354,20 @@ void readIMU() {
         tiltAngle = acos(val) * 180.0f / PI;
     }
 
+    // Accelerometer magnitude deviation from gravity (approx 9.80665 m/s^2)
+    float accelDev = abs(gMag - 9.80665f);
+    bool imuMotionDetected = false;
+    if (mpuOK) {
+        if (accelDev >= TAMPER_MPU_ACCEL_THRESH || gyroMaxRate >= TAMPER_MPU_GYRO_THRESH) {
+            imuMotionDetected = true;
+        }
+    }
+
     xSemaphoreTake(stateMutex, portMAX_DELAY);
     sharedTelemetry.pitch = filterPitch;
     sharedTelemetry.roll = filterRoll;
     sharedTelemetry.tilt = tiltAngle;
+    sharedTelemetry.vibration_state = imuMotionDetected;
     xSemaphoreGive(stateMutex);
 }
 
@@ -380,7 +392,7 @@ void sensorPollTask(void *pvParameters) {
 
             static int tiltSwDebounceTicks = 0;
             bool tiltSw = false;
-            bool rawTiltSw = (digitalRead(TILT_SWITCH_PIN) == LOW); // LOW = Tilted (active), HIGH = Upright (idle)
+            bool rawTiltSw = (digitalRead(TILT_SWITCH_PIN) == HIGH); // HIGH = Tilted (active/open), LOW = Upright (idle/closed)
             if (rawTiltSw) {
                 tiltSwDebounceTicks++;
                 if (tiltSwDebounceTicks >= 4) { // ~200ms at 20Hz
@@ -394,7 +406,7 @@ void sensorPollTask(void *pvParameters) {
             xSemaphoreTake(stateMutex, portMAX_DELAY);
             sharedTelemetry.occupied = false; // FSR seat sensor removed
             sharedTelemetry.tilt_switch_state = tiltSw;
-            sharedTelemetry.vibration_state = false; // SW-420 vibration sensor removed
+            // sharedTelemetry.vibration_state is set dynamically inside readIMU() at 50Hz
             sharedTelemetry.batt_v = battV;
             sharedTelemetry.batt_pct = battPct;
             sharedTelemetry.uptime_s = millis() / 1000;
