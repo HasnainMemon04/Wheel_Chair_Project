@@ -36,6 +36,8 @@ struct LocalCommand {
     int time_left;
     int kmh;
     float radius;
+    double lat;
+    double lng;
 };
 
 // HMAC calculation using ESP32's mbedtls
@@ -329,6 +331,8 @@ void processCommands(const String &jsonResponse) {
         lc.time_left = args["time_left"] | 120;
         lc.kmh = args["kmh"] | SPEED_LIMIT_KMH;
         lc.radius = args["radius"] | GEOFENCE_RADIUS_M;
+        lc.lat = args["lat"] | 24.860048;
+        lc.lng = args["lng"] | 67.063734;
         
         pendingCmds.push_back(lc);
     }
@@ -421,8 +425,14 @@ void processCommands(const String &jsonResponse) {
             sharedTelemetry.speed_limit_kmh = lc.kmh;
             ok = true;
         } else if (cmd == "SET_GEOFENCE") {
+            sharedTelemetry.gf.center_lat = lc.lat;
+            sharedTelemetry.gf.center_lng = lc.lng;
             sharedTelemetry.gf.radius_m = lc.radius;
-            sharedTelemetry.gf.inside = true; 
+            sharedTelemetry.gf.on = true;
+            // Recalculate inside/outside status immediately
+            double dist = calculateDistance(sharedTelemetry.gps_lat, sharedTelemetry.gps_lng, lc.lat, lc.lng);
+            sharedTelemetry.gf.dist_m = dist;
+            sharedTelemetry.gf.inside = (dist <= lc.radius);
             ok = true;
         } else if (cmd == "PING") {
             ok = true;

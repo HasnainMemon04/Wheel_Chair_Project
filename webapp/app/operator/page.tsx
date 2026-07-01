@@ -31,12 +31,25 @@ export default function OperatorPage() {
   // Custom inputs for commands
   const [speedLimit, setSpeedLimit] = useState<number>(6);
   const [gfRadius, setGfRadius] = useState<number>(300);
+  const [gfLat, setGfLat] = useState<string>("24.860048");
+  const [gfLng, setGfLng] = useState<string>("67.063734");
 
   // Track pending command states for each chair to support Optimistic UI
   const [pendingStates, setPendingStates] = useState<Record<string, { power?: boolean; locked?: boolean; ts?: number }>>({});
   const [latencyMs, setLatencyMs] = useState<number | null>(null);
 
   const selectedChair = deviceStates.find((d) => d.wheelchair_id === selectedId);
+
+  // Prefill geofence coordinates when a new device is selected
+  useEffect(() => {
+    if (selectedChair) {
+      setGfLat(selectedChair.lat.toFixed(6));
+      setGfLng(selectedChair.lng.toFixed(6));
+      if (selectedChair.geofence) {
+        setGfRadius(selectedChair.geofence.r);
+      }
+    }
+  }, [selectedId]);
 
   // Reconcile optimistic states with incoming DB updates
   useEffect(() => {
@@ -435,30 +448,68 @@ export default function OperatorPage() {
                       </div>
 
                       {/* Geofence adjust */}
-                      <div className="space-y-1.5 bg-zinc-900/30 p-3 rounded-lg border border-zinc-900">
+                      <div className="space-y-3 bg-zinc-900/30 p-3 rounded-lg border border-zinc-900">
                         <div className="flex justify-between items-center text-xs">
-                          <span className="text-zinc-500">Geofence Radius</span>
-                          <span className="font-semibold text-zinc-300">{gfRadius} meters</span>
+                          <span className="text-zinc-500 font-bold uppercase tracking-wider text-[10px]">Geofence settings</span>
+                          <span className="font-semibold text-zinc-300 text-[10px] bg-zinc-800 px-1.5 py-0.5 rounded">{gfRadius} meters</span>
                         </div>
-                        <input
-                          type="range"
-                          min="100"
-                          max="1000"
-                          step="50"
-                          value={gfRadius}
-                          onChange={(e) => setGfRadius(parseInt(e.target.value))}
-                          className="w-full h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-blue-500"
-                        />
+                        
+                        {/* Manual coordinates input */}
+                        <div className="grid grid-cols-2 gap-2">
+                          <div className="space-y-1">
+                            <label className="text-[9px] uppercase font-bold text-zinc-500">Center Latitude</label>
+                            <input
+                              type="text"
+                              value={gfLat}
+                              onChange={(e) => setGfLat(e.target.value)}
+                              className="w-full bg-zinc-900 border border-zinc-800 p-2 rounded text-xs font-mono text-zinc-200 focus:outline-none focus:border-blue-500"
+                              placeholder="24.860048"
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-[9px] uppercase font-bold text-zinc-500">Center Longitude</label>
+                            <input
+                              type="text"
+                              value={gfLng}
+                              onChange={(e) => setGfLng(e.target.value)}
+                              className="w-full bg-zinc-900 border border-zinc-800 p-2 rounded text-xs font-mono text-zinc-200 focus:outline-none focus:border-blue-500"
+                              placeholder="67.063734"
+                            />
+                          </div>
+                        </div>
+
+                        {/* Radius Slider */}
+                        <div className="space-y-1">
+                          <label className="text-[9px] uppercase font-bold text-zinc-500">Radius</label>
+                          <input
+                            type="range"
+                            min="50"
+                            max="2000"
+                            step="50"
+                            value={gfRadius}
+                            onChange={(e) => setGfRadius(parseInt(e.target.value))}
+                            className="w-full h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                          />
+                        </div>
+
                         <button
-                          onClick={() => triggerCommand('SET_GEOFENCE', { 
-                            lat: selectedChair.lat, 
-                            lng: selectedChair.lng, 
-                            radius: gfRadius 
-                          })}
+                          onClick={() => {
+                            const latVal = parseFloat(gfLat);
+                            const lngVal = parseFloat(gfLng);
+                            if (isNaN(latVal) || isNaN(lngVal)) {
+                              alert("Please enter valid decimal coordinates for latitude and longitude.");
+                              return;
+                            }
+                            triggerCommand('SET_GEOFENCE', { 
+                              lat: latVal, 
+                              lng: lngVal, 
+                              radius: gfRadius 
+                            });
+                          }}
                           disabled={actionLoading}
-                          className="w-full mt-2 py-1 text-[10px] font-bold bg-blue-600 hover:bg-blue-500 text-white rounded transition-all cursor-pointer"
+                          className="w-full py-2 text-[10px] font-bold bg-blue-600 hover:bg-blue-500 text-white rounded transition-all cursor-pointer uppercase tracking-wider"
                         >
-                          Redefine Geofence Centered Here
+                          Apply Custom Geofence
                         </button>
                       </div>
 
