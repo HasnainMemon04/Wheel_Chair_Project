@@ -594,7 +594,7 @@ export default function RiderPage() {
 
       {/* Emergency Alert HUD Overlay (Fall/Tilt/SOS) */}
       {rentedChair && (rentedChair.session_state === 'SAFE_FAULT' || rentedChair.tilt > 50) && (
-        <div className="absolute inset-0 bg-[#09090b]/85 backdrop-blur-md z-50 flex items-center justify-center p-4">
+        <div className="fixed inset-0 bg-[#09090b]/85 backdrop-blur-md z-[9999] flex items-center justify-center p-4">
           <div className="bg-zinc-950 border border-red-500/30 p-6 rounded-2xl max-w-sm w-full space-y-4 shadow-2xl text-center">
             <div className="w-16 h-16 rounded-full bg-red-500/10 border border-red-500/20 flex items-center justify-center mx-auto text-red-500 animate-pulse">
               <AlertTriangle className="w-8 h-8 animate-bounce" />
@@ -617,7 +617,7 @@ export default function RiderPage() {
                 onClick={() => triggerRiderCommand('CLEAR_SOS')}
                 className="w-full py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg text-xs transition-all cursor-pointer uppercase tracking-wider"
               >
-                Clear Alarm
+                Turn Off SOS
               </button>
               <button
                 onClick={() => {
