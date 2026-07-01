@@ -6,7 +6,10 @@ import dynamic from 'next/dynamic';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useFleetState, DeviceState } from '../../hooks/useFleetState';
 import { supabase } from '../../utils/supabase';
-import { MapPin, Battery, ShieldAlert, Zap, Clock, CreditCard, PlusCircle, CheckCircle2, Lock } from 'lucide-react';
+import { 
+  MapPin, Battery, ShieldAlert, Zap, Clock, CreditCard, 
+  PlusCircle, CheckCircle2, Lock, AlertTriangle 
+} from 'lucide-react';
 
 // Dynamically import Leaflet Map to avoid Next.js SSR "window is not defined" crashes
 const Map = dynamic(() => import('../../components/Map'), {
@@ -27,6 +30,27 @@ export default function RiderPage() {
   const [actionLoading, setActionLoading] = useState(false);
   const [seeding, setSeeding] = useState(false);
 
+  // Simulated Wallet States (SAR currency for Saudi Arabia clients)
+  const [walletBalance, setWalletBalance] = useState<number>(150.00);
+  const [showTopUp, setShowTopUp] = useState<boolean>(false);
+  const [topUpAmount, setTopUpAmount] = useState<string>("100");
+  const [paymentMethod, setPaymentMethod] = useState<'card' | 'bank' | 'applepay'>('card');
+
+  // Load wallet balance from localStorage for persistent demo tracking
+  useEffect(() => {
+    const stored = localStorage.getItem('simulated_wallet_balance');
+    if (stored) {
+      setWalletBalance(parseFloat(stored));
+    } else {
+      localStorage.setItem('simulated_wallet_balance', '150.00');
+    }
+  }, []);
+
+  const updateWalletBalance = (newBalance: number) => {
+    setWalletBalance(newBalance);
+    localStorage.setItem('simulated_wallet_balance', newBalance.toFixed(2));
+  };
+
   // Filter for available chairs
   const availableChairs = deviceStates.filter(d => d.online && (!d.session_state || d.session_state === 'LOCKED' || d.session_state === 'AVAILABLE'));
   const selectedChair = deviceStates.find(d => d.wheelchair_id === selectedId);
@@ -46,7 +70,6 @@ export default function RiderPage() {
       setTimeLeft(prev => {
         if (prev <= 1) {
           clearInterval(interval);
-          // Maintain activeRental reference so the LOCKED banner is shown in the UI
           return 0;
         }
         return prev - 1;
@@ -79,14 +102,21 @@ export default function RiderPage() {
     }
   };
 
-  // Rent / Unlock trigger (Mock payment Webhook call)
+  // Rent / Unlock trigger (checks wallet balance and calls payment webhook)
   const handleRent = async (durationMinutes: number) => {
     if (!selectedId) return;
     setActionLoading(true);
 
+    const price = durationMinutes === 1 ? 0 : durationMinutes === 15 ? 5.00 : 10.00;
+
+    if (walletBalance < price) {
+      alert(`Insufficient Funds! The rental price is ${price.toFixed(2)} SAR, but your wallet balance is only ${walletBalance.toFixed(2)} SAR. Please top up your wallet.`);
+      setActionLoading(false);
+      return;
+    }
+
     try {
       // 1. Create client rental intent (reserved state)
-      // Note: RLS allows riders to create own rentals.
       const { data: profile } = await supabase.from('profiles').select('id').limit(1).single();
       const userId = profile?.id || null;
 
@@ -104,7 +134,7 @@ export default function RiderPage() {
 
       if (rError) throw rError;
 
-      // 2. Trigger Mock Payment webhook route handler (Dev webhook call)
+      // 2. Trigger Mock Payment webhook route handler
       const res = await fetch('/api/payments/webhook', {
         method: 'POST',
         headers: {
@@ -113,7 +143,7 @@ export default function RiderPage() {
         body: JSON.stringify({
           provider: 'mock',
           rental_id: rental.id,
-          amount: 500,
+          amount: price * 100, // in cents/fils
           provider_ref: `MOCK-REF-${Date.now()}`
         })
       });
@@ -121,12 +151,40 @@ export default function RiderPage() {
       const paymentResult = await res.json();
       if (!res.ok) throw new Error(paymentResult.error || "Payment processing failed");
 
+      // Deduct from simulated wallet
+      updateWalletBalance(walletBalance - price);
+
       // Set active local session
       setActiveRental(rental);
       setTimeLeft(durationMinutes * 60);
       
     } catch (err: any) {
       alert("Booking error: " + err.message);
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  // Dispatch SOS command directly from Rider Panel
+  const triggerRiderCommand = async (cmd: string, args: any = {}) => {
+    const targetId = selectedId || activeRental?.wheelchair_id;
+    if (!targetId) return;
+    
+    setActionLoading(true);
+    try {
+      const { error } = await supabase
+        .from('commands')
+        .insert({
+          wheelchair_id: targetId,
+          cmd,
+          args,
+          status: 'pending',
+          req_id: `cmd-${Date.now()}`
+        });
+
+      if (error) throw error;
+    } catch (err: any) {
+      alert("Command failure: " + err.message);
     } finally {
       setActionLoading(false);
     }
@@ -161,8 +219,25 @@ export default function RiderPage() {
           </div>
           <span className="px-2.5 py-0.5 rounded-full bg-blue-500/10 text-blue-400 text-xs font-semibold flex items-center gap-1.5">
             <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-ping" />
-            Live status
+            Live
           </span>
+        </div>
+
+        {/* Simulated Wallet Card (SAR Currency) */}
+        <div className="mx-6 mt-4 p-4 rounded-xl bg-zinc-900/60 border border-zinc-900/60 flex justify-between items-center hover:border-zinc-800 transition-all">
+          <div className="space-y-1">
+            <span className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider">Simulated Wallet</span>
+            <div className="font-extrabold text-zinc-200 text-lg flex items-baseline gap-1">
+              {walletBalance.toFixed(2)}
+              <span className="text-[10px] font-normal text-zinc-500">SAR</span>
+            </div>
+          </div>
+          <button 
+            onClick={() => setShowTopUp(true)}
+            className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-bold transition-all cursor-pointer shadow-lg"
+          >
+            Add Funds
+          </button>
         </div>
 
         {/* Content Area */}
@@ -249,6 +324,22 @@ export default function RiderPage() {
                     <div className="text-2xl font-bold font-mono text-zinc-300 mt-0.5">{displaySpeedLimit} km/h</div>
                   </div>
                 </div>
+
+                {/* Manual SOS Panic Trigger */}
+                {!displayLocked && (
+                  <button
+                    onClick={() => triggerRiderCommand(rentedChair?.session_state === 'SAFE_FAULT' ? 'CLEAR_SOS' : 'SOS')}
+                    disabled={actionLoading}
+                    className={`mt-3.5 w-full flex items-center justify-center gap-1.5 py-2.5 text-xs font-bold rounded-lg border transition-all cursor-pointer uppercase tracking-wider ${
+                      rentedChair?.session_state === 'SAFE_FAULT'
+                        ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20'
+                        : 'border-red-500/25 bg-red-500/10 text-red-500 hover:bg-red-500/20'
+                    }`}
+                  >
+                    <AlertTriangle className="w-3.5 h-3.5 animate-pulse" />
+                    {rentedChair?.session_state === 'SAFE_FAULT' ? 'Clear Emergency SOS' : 'Trigger Emergency SOS'}
+                  </button>
+                )}
 
                 {displaySessionState === "EXPIRING" && !displayLocked && (
                   <div className="mt-3 flex items-center gap-2 text-xs text-amber-500 font-medium bg-amber-500/10 p-2 rounded-lg">
@@ -344,9 +435,9 @@ export default function RiderPage() {
 
                 <div className="grid grid-cols-3 gap-2">
                   {[
-                    { label: '1 Min', value: 1, price: 'Mock Free' },
-                    { label: '15 Mins', value: 15, price: '$5.00' },
-                    { label: '30 Mins', value: 30, price: '$9.00' }
+                    { label: '1 Min', value: 1, price: 'Free Demo' },
+                    { label: '15 Mins', value: 15, price: '5.00 SAR' },
+                    { label: '30 Mins', value: 30, price: '10.00 SAR' }
                   ].map((plan) => (
                     <button 
                       key={plan.value}
@@ -362,7 +453,7 @@ export default function RiderPage() {
 
                 <div className="text-[10px] text-zinc-500 leading-normal flex items-start gap-1.5 mt-2">
                   <CreditCard className="w-3.5 h-3.5 flex-shrink-0 text-zinc-400" />
-                  Payments processed securely. Webhook directly instructs database cloud triggers.
+                  Payments processed in SAR. Deducted directly from your simulated balance.
                 </div>
               </motion.div>
             )}
@@ -380,6 +471,166 @@ export default function RiderPage() {
         </div>
 
       </div>
+
+      {/* Simulated Deposit (Top Up) dialog modal */}
+      {showTopUp && (
+        <div className="absolute inset-0 bg-[#09090b]/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
+          <div className="bg-zinc-950 border border-zinc-900 p-6 rounded-2xl max-w-sm w-full space-y-5 shadow-2xl">
+            <div className="flex justify-between items-center border-b border-zinc-900 pb-3">
+              <h3 className="font-black text-sm uppercase tracking-wider text-zinc-200">Top Up Wallet</h3>
+              <button 
+                onClick={() => setShowTopUp(false)}
+                className="text-zinc-500 hover:text-zinc-300 text-xs font-bold cursor-pointer"
+              >
+                Close
+              </button>
+            </div>
+
+            {/* Amount Input */}
+            <div className="space-y-1.5">
+              <label className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider">Top Up Amount (SAR)</label>
+              <div className="relative">
+                <input 
+                  type="number" 
+                  value={topUpAmount}
+                  onChange={(e) => setTopUpAmount(e.target.value)}
+                  className="w-full bg-zinc-900 border border-zinc-800 p-3 rounded-lg text-sm text-zinc-200 font-bold focus:outline-none focus:border-blue-500"
+                  placeholder="100.00"
+                />
+                <span className="absolute right-3 top-3 text-xs font-bold text-zinc-500">SAR</span>
+              </div>
+            </div>
+
+            {/* Payment Method selector */}
+            <div className="space-y-1.5">
+              <label className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider">Payment Method</label>
+              <div className="grid grid-cols-3 gap-2">
+                <button
+                  onClick={() => setPaymentMethod('card')}
+                  className={`p-2.5 rounded-lg border text-[10px] font-bold transition-all text-center cursor-pointer ${
+                    paymentMethod === 'card' 
+                      ? 'border-blue-500/50 bg-blue-500/5 text-blue-400' 
+                      : 'border-zinc-800 bg-zinc-900 text-zinc-400'
+                  }`}
+                >
+                  💳 Mada / Visa
+                </button>
+                <button
+                  onClick={() => setPaymentMethod('bank')}
+                  className={`p-2.5 rounded-lg border text-[10px] font-bold transition-all text-center cursor-pointer ${
+                    paymentMethod === 'bank' 
+                      ? 'border-blue-500/50 bg-blue-500/5 text-blue-400' 
+                      : 'border-zinc-800 bg-zinc-900 text-zinc-400'
+                  }`}
+                >
+                  🏦 Saudi Bank
+                </button>
+                <button
+                  onClick={() => setPaymentMethod('applepay')}
+                  className={`p-2.5 rounded-lg border text-[10px] font-bold transition-all text-center cursor-pointer ${
+                    paymentMethod === 'applepay' 
+                      ? 'border-blue-500/50 bg-blue-500/5 text-blue-400' 
+                      : 'border-zinc-800 bg-zinc-900 text-zinc-400'
+                  }`}
+                >
+                  🍏 Apple Pay
+                </button>
+              </div>
+            </div>
+
+            {/* Details mapping fields */}
+            {paymentMethod === 'card' && (
+              <div className="space-y-3 bg-zinc-900/30 p-3 rounded-lg border border-zinc-900 text-xs">
+                <input 
+                  type="text" 
+                  placeholder="Cardholder Name" 
+                  className="w-full bg-zinc-900 border border-zinc-800 p-2.5 rounded text-zinc-300 placeholder-zinc-600 focus:outline-none"
+                  defaultValue="Ahmed Al-Otaibi"
+                />
+                <input 
+                  type="text" 
+                  placeholder="Card Number (4000 1234 5678 9010)" 
+                  className="w-full bg-zinc-900 border border-zinc-800 p-2.5 rounded text-zinc-300 placeholder-zinc-600 focus:outline-none font-mono"
+                  defaultValue="4000 1234 5678 9010"
+                />
+                <div className="grid grid-cols-2 gap-2">
+                  <input type="text" placeholder="MM/YY" className="bg-zinc-900 border border-zinc-800 p-2.5 rounded text-zinc-300 placeholder-zinc-600 focus:outline-none" defaultValue="10/28" />
+                  <input type="text" placeholder="CVV" className="bg-zinc-900 border border-zinc-800 p-2.5 rounded text-zinc-300 placeholder-zinc-600 focus:outline-none" defaultValue="321" />
+                </div>
+              </div>
+            )}
+
+            {paymentMethod === 'bank' && (
+              <div className="bg-zinc-900/50 p-3 rounded-lg border border-zinc-900 text-[10px] text-zinc-400 leading-relaxed font-mono">
+                <span className="text-[10px] uppercase font-bold text-zinc-500 tracking-wider">Al Rajhi Bank (Saudi Arabia)</span>
+                <div className="mt-1">IBAN: SA80 8000 0000 9876 5432 1010</div>
+                <div>Account: 987654321010</div>
+                <div className="mt-2 text-zinc-500">Press button below once you complete the local bank transfer request.</div>
+              </div>
+            )}
+
+            {paymentMethod === 'applepay' && (
+              <div className="bg-zinc-900/50 p-3 rounded-lg border border-zinc-900 text-xs text-center text-zinc-400 py-4">
+                🍏 Apple Pay Secure Instant Authorization Available.
+              </div>
+            )}
+
+            <button
+              onClick={() => {
+                const amount = parseFloat(topUpAmount);
+                if (!isNaN(amount) && amount > 0) {
+                  updateWalletBalance(walletBalance + amount);
+                  setShowTopUp(false);
+                  alert(`Successfully topped up ${amount.toFixed(2)} SAR using ${paymentMethod === 'card' ? 'Mada Card' : paymentMethod === 'bank' ? 'Al Rajhi Bank Transfer' : 'Apple Pay'}.`);
+                }
+              }}
+              className="w-full py-2.5 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-lg text-xs transition-all cursor-pointer uppercase tracking-wider"
+            >
+              Confirm Deposit
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Emergency Alert HUD Overlay (Fall/Tilt/SOS) */}
+      {rentedChair && (rentedChair.session_state === 'SAFE_FAULT' || rentedChair.tilt > 50) && (
+        <div className="absolute inset-0 bg-[#09090b]/85 backdrop-blur-md z-50 flex items-center justify-center p-4">
+          <div className="bg-zinc-950 border border-red-500/30 p-6 rounded-2xl max-w-sm w-full space-y-4 shadow-2xl text-center">
+            <div className="w-16 h-16 rounded-full bg-red-500/10 border border-red-500/20 flex items-center justify-center mx-auto text-red-500 animate-pulse">
+              <AlertTriangle className="w-8 h-8 animate-bounce" />
+            </div>
+            <div className="space-y-1">
+              <h2 className="text-lg font-black text-red-500 uppercase tracking-wider">Emergency SOS Active</h2>
+              <p className="text-zinc-400 text-xs font-semibold">
+                {rentedChair.tilt > 50 ? "Automatic Tilt/Fall Detected!" : "Manual Emergency SOS Triggered!"}
+              </p>
+            </div>
+            <div className="bg-zinc-900 p-3 rounded-lg border border-zinc-800 text-xs font-mono text-zinc-300">
+              <div className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider mb-1">Broadcasting Live Location</div>
+              Coordinates: {rentedChair.lat.toFixed(6)}, {rentedChair.lng.toFixed(6)}
+            </div>
+            <p className="text-[10px] text-zinc-500 leading-normal">
+              📡 Sending live coordinates to nearest emergency rescue dispatchers (Saudi Red Crescent Authority).
+            </p>
+            <div className="grid grid-cols-2 gap-2 mt-2">
+              <button
+                onClick={() => triggerRiderCommand('CLEAR_SOS')}
+                className="w-full py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg text-xs transition-all cursor-pointer uppercase tracking-wider"
+              >
+                Clear Alarm
+              </button>
+              <button
+                onClick={() => {
+                  alert("Saudi Red Crescent dispatcher notified! Emergency assistance dispatched to Karachi coordinates.");
+                }}
+                className="w-full py-2 bg-red-600 hover:bg-red-500 text-white font-bold rounded-lg text-xs transition-all cursor-pointer uppercase tracking-wider"
+              >
+                Call Red Crescent
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );

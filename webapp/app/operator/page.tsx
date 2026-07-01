@@ -394,9 +394,21 @@ export default function OperatorPage() {
                           ) : (
                             <Lock className="w-3.5 h-3.5" />
                           )}
-                          {displayLocked ? 'Unlock' : 'Lock'}
                         </button>
                       </div>
+
+                      <button
+                        onClick={() => triggerCommand(selectedChair.session_state === 'SAFE_FAULT' ? 'CLEAR_SOS' : 'SOS')}
+                        disabled={actionLoading}
+                        className={`w-full flex items-center justify-center gap-1.5 py-2.5 text-xs font-bold rounded-lg border transition-all cursor-pointer uppercase tracking-wider ${
+                          selectedChair.session_state === 'SAFE_FAULT'
+                            ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20'
+                            : 'border-red-500/20 bg-red-500/10 text-red-500 hover:bg-red-500/20'
+                        }`}
+                      >
+                        <AlertTriangle className="w-4 h-4 animate-pulse" />
+                        {selectedChair.session_state === 'SAFE_FAULT' ? 'Clear SOS Alarm' : 'Trigger Manual SOS'}
+                      </button>
 
                       {/* Speed limit slider */}
                       <div className="space-y-1.5 bg-zinc-900/30 p-3 rounded-lg border border-zinc-900">
@@ -508,6 +520,36 @@ export default function OperatorPage() {
         </div>
 
       </div>
+
+      {/* Emergency Alert HUD Overlay (Fall/Tilt/SOS) */}
+      {selectedChair && (selectedChair.session_state === 'SAFE_FAULT' || selectedChair.tilt > 50) && (
+        <div className="absolute inset-0 bg-[#09090b]/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
+          <div className="bg-zinc-950 border border-red-500/30 p-6 rounded-2xl max-w-sm w-full space-y-4 shadow-2xl text-center">
+            <div className="w-16 h-16 rounded-full bg-red-500/10 border border-red-500/20 flex items-center justify-center mx-auto text-red-500 animate-pulse">
+              <AlertTriangle className="w-8 h-8 animate-bounce" />
+            </div>
+            <div className="space-y-1">
+              <h2 className="text-lg font-black text-red-500 uppercase tracking-wider">Emergency Alarm Active</h2>
+              <p className="text-zinc-400 text-xs font-semibold">
+                {selectedChair.tilt > 50 ? "Automatic Tilt/Fall Detected!" : "Manual Emergency SOS Triggered!"}
+              </p>
+            </div>
+            <div className="bg-zinc-900 p-3 rounded-lg border border-zinc-800 text-xs font-mono text-zinc-300">
+              <div className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider mb-1">Broadcasting Live Location</div>
+              Coordinates: {selectedChair.lat.toFixed(6)}, {selectedChair.lng.toFixed(6)}
+            </div>
+            <p className="text-[10px] text-zinc-500 leading-normal">
+              📡 Sending live coordinates to nearest emergency rescue dispatchers (Trauma & EMS services).
+            </p>
+            <button
+              onClick={() => triggerCommand('CLEAR_SOS')}
+              className="w-full py-2.5 bg-red-600 hover:bg-red-500 text-white font-bold rounded-lg text-xs transition-all cursor-pointer uppercase tracking-wider"
+            >
+              Acknowledge & Clear SOS
+            </button>
+          </div>
+        </div>
+      )}
 
     </div>
   );

@@ -26,8 +26,8 @@ export async function POST() {
       .upsert({
         wheelchair_id: 'WCHAIR-001',
         online: true,
-        lat: 24.860731,
-        lng: 67.001142,
+        lat: 24.860048,
+        lng: 67.063734,
         speed: 0.0,
         sats: 8,
         hdop: 1.2,

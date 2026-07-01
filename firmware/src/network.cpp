@@ -387,6 +387,16 @@ void processCommands(const String &jsonResponse) {
                 sharedTelemetry.time_left_s = lc.duration_s;
                 ok = true;
             }
+        } else if (cmd == "SOS") {
+            sharedTelemetry.session_state = "SAFE_FAULT";
+            sharedTelemetry.locked_state = true;
+            triggerManualSOS();
+            ok = true;
+        } else if (cmd == "CLEAR_SOS") {
+            sharedTelemetry.session_state = "LOCKED";
+            sharedTelemetry.locked_state = true;
+            clearManualSOS();
+            ok = true;
         } else if (cmd == "WARN_EXPIRY") {
             if (sharedTelemetry.session_state == "ACTIVE") {
                 sharedTelemetry.session_state = "EXPIRING";
@@ -427,7 +437,7 @@ void processCommands(const String &jsonResponse) {
         xSemaphoreGive(stateMutex);
         
         // Apply changes to relays IMMEDIATELY (sub-millisecond actuation)
-        if (ok && (cmd == "POWER_ON" || cmd == "POWER_OFF" || cmd == "LOCK" || cmd == "UNLOCK")) {
+        if (ok && (cmd == "POWER_ON" || cmd == "POWER_OFF" || cmd == "LOCK" || cmd == "UNLOCK" || cmd == "SOS" || cmd == "CLEAR_SOS")) {
             applyActuatorStates();
         }
 

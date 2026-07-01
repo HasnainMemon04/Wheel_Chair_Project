@@ -266,19 +266,19 @@ export default function Map({ deviceStates, selectedId, onSelectDevice }: MapPro
 
   }, [deviceStates, onSelectDevice]);
 
-  // Center on selected wheelchair
+  // Center on selected wheelchair dynamically as its coordinates update
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !selectedId) return;
 
-    const data = markersRef.current[selectedId];
-    if (data) {
-      map.setView([data.currentLat, data.currentLng], 16, {
+    const device = deviceStates.find(d => d.wheelchair_id === selectedId);
+    if (device && !isNaN(device.lat) && !isNaN(device.lng)) {
+      map.setView([device.lat, device.lng], map.getZoom() || 16, {
         animate: true,
-        duration: 1.0
+        duration: 0.5
       });
     }
-  }, [selectedId]);
+  }, [selectedId, deviceStates]);
 
   return (
     <div className="relative h-full w-full dark-map">

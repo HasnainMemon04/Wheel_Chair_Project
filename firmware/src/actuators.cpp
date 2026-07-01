@@ -14,6 +14,10 @@ static bool fallLatched = false;
 static bool fallReported = false;
 static int fallBreachTicks = 0;
 
+// Manual SOS latches
+static bool manualSOSLatched = false;
+static bool manualSOSReported = false;
+
 // Warnings and events latches
 static bool tiltWarnLatched = false;
 static bool geofenceExitLatched = false;
@@ -100,7 +104,7 @@ void applyActuatorStates() {
     bool tiltSwActive = sharedTelemetry.tilt_switch_state;
     xSemaphoreGive(stateMutex);
 
-    bool safetyInterlockActive = (overtempLatched || fallLatched);
+    bool safetyInterlockActive = (overtempLatched || fallLatched || manualSOSLatched);
 
     if (safetyInterlockActive) {
         setPowerRelay(!overtempLatched);
@@ -113,6 +117,16 @@ void applyActuatorStates() {
             setMotionRelay(false);
         }
     }
+}
+
+// Manual SOS API controls
+void triggerManualSOS() {
+    manualSOSLatched = true;
+}
+
+void clearManualSOS() {
+    manualSOSLatched = false;
+    manualSOSReported = false;
 }
 
 // Safety Supervisor Task running at 20 Hz
@@ -192,18 +206,21 @@ void safetySupervisorTask(void *pvParameters) {
             }
         }
 
-        // Auto-reset fall interlock if device uprighted (< 30 deg and switch closed) AND operator clears state
-        if (fallLatched && tilt < TILT_WARN_DEG && !tiltSwActive) {
+        // Auto-reset fall & manual SOS interlock if operator clears state (and device uprighted if fall occurred)
+        bool canClearFall = !fallLatched || (tilt < TILT_WARN_DEG && !tiltSwActive);
+        if ((fallLatched || manualSOSLatched) && canClearFall) {
             // If operator sent LOCK or UNLOCK (meaning state transitioned away from SAFE_FAULT)
             if (state == "LOCKED" || state == "ACTIVE") {
                 fallLatched = false;
                 fallReported = false;
-                Serial.println("[Safety] FALL Latch cleared by operator acknowledgment.");
+                manualSOSLatched = false;
+                manualSOSReported = false;
+                Serial.println("[Safety] Emergency latches cleared by operator acknowledgment.");
             }
         }
 
         // 3. Evaluate active safety interlock states
-        bool safetyInterlockActive = (overtempLatched || fallLatched);
+        bool safetyInterlockActive = (overtempLatched || fallLatched || manualSOSLatched);
 
         if (safetyInterlockActive) {
             // Relays force fail-safe open states
@@ -223,6 +240,10 @@ void safetySupervisorTask(void *pvParameters) {
             if (fallLatched && !fallReported) {
                 fallReported = true;
                 reportSafetyEvent("FALL", "{\"tilt\":" + String(tilt) + ",\"switch\":" + String(tiltSwActive ? 1 : 0) + "}");
+            }
+            if (manualSOSLatched && !manualSOSReported) {
+                manualSOSReported = true;
+                reportSafetyEvent("SOS", "{\"manual\":1}");
             }
         } else {
             // Normal Operating Mode (No active interlocks)
