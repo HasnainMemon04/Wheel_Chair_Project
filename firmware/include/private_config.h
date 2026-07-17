@@ -6,4 +6,4 @@
 
 // Supabase details
 #define SUPABASE_URL       "https://txqjevrhedgsjltnflmg.supabase.co"
-#define DEVICE_KEY         "super-secret-key-123"
+#define DEVICE_KEY         "SECURE_SECRET_KEY_FOR_CHAIR_2"

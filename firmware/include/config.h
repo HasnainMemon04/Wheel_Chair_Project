@@ -6,7 +6,7 @@
 #pragma once
 
 // ------------------------- Identity -------------------------
-#define DEVICE_ID          "WCHAIR-001"
+#define DEVICE_ID          "WCHAIR-002"
 #define FW_VERSION         "0.3.2"
 
 // ------------------------- WiFi & Supabase Credentials -------
