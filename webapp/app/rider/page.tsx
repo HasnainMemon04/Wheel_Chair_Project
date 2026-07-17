@@ -798,11 +798,11 @@ export default function RiderPage() {
               </p>
             </div>
             <div className="bg-zinc-900 p-3 rounded-lg border border-zinc-800 text-xs font-mono text-zinc-300">
-              <div className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider mb-1">Broadcasting Live Location</div>
+              <div className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider mb-1">Live Location</div>
               Coordinates: {(rentedChair.lat ?? 0).toFixed(6)}, {(rentedChair.lng ?? 0).toFixed(6)}
             </div>
             <p className="text-[10px] text-zinc-500 leading-normal">
-              📡 Sending live coordinates to nearest emergency rescue dispatchers (Saudi Red Crescent Authority).
+              Live coordinates are available to the emergency response workflow.
             </p>
             <div className="grid grid-cols-2 gap-2 mt-2">
               <button

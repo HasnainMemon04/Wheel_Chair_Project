@@ -24,6 +24,62 @@ struct PendingOTADef {
 
 static PendingOTADef pendingOTA = {false, "", "", 0};
 
+static void setOTAStatus(const String &status, int progress, const String &lastError = "") {
+    xSemaphoreTake(stateMutex, portMAX_DELAY);
+    sharedTelemetry.ota_status = status;
+    sharedTelemetry.ota_progress = progress;
+    sharedTelemetry.ota_last_error = lastError;
+    xSemaphoreGive(stateMutex);
+}
+
+static void reportOTAStage(const String &stage, const String &message, int progress, const String &version = "") {
+    String detail = "{\"stage\":\"" + stage + "\",\"message\":\"" + message + "\",\"progress\":" + String(progress);
+    if (version.length() > 0) {
+        detail += ",\"version\":\"" + version + "\"";
+    }
+    detail += "}";
+
+    Serial.printf("[OTA] %s (%d%%)%s%s\n",
+                  message.c_str(),
+                  progress,
+                  version.length() > 0 ? " version " : "",
+                  version.length() > 0 ? version.c_str() : "");
+    reportSafetyEvent("OTA_STAGE", detail);
+}
+
+static void enterOTAMaintenanceMode(const String &version) {
+    xSemaphoreTake(stateMutex, portMAX_DELAY);
+    sharedTelemetry.power_state = false;
+    sharedTelemetry.locked_state = true;
+    sharedTelemetry.session_state = "LOCKED";
+    sharedTelemetry.time_left_s = 0;
+    sharedTelemetry.ota_status = "preparing";
+    sharedTelemetry.ota_progress = 0;
+    sharedTelemetry.ota_last_error = "";
+    xSemaphoreGive(stateMutex);
+
+    // Keep ESP32/WiFi alive, but close the wheelchair actuation system.
+    // Motion relay is locked and power state is off until the OTA completes.
+    setMotionRelay(false);
+    buzzerWrite(false);
+    updateRGBLED(0, 0, 0);
+    applyActuatorStates();
+
+    reportOTAStage("system_closed", "All system closed for firmware update", 0, version);
+}
+
+static void failOTA(const String &reason, const String &message, const String &version = "", int code = 0) {
+    setOTAStatus("failed", otaProgressPercent, message);
+
+    String detail = "{\"reason\":\"" + reason + "\"";
+    if (code != 0) detail += ",\"code\":" + String(code);
+    if (version.length() > 0) detail += ",\"version\":\"" + version + "\"";
+    detail += "}";
+
+    reportSafetyEvent("OTA_FAIL", detail);
+    reportOTAStage("failed", message, otaProgressPercent, version);
+}
+
 bool isOTABusy() {
     return otaRunning;
 }
@@ -171,6 +227,7 @@ void initOTA() {
                         sharedTelemetry.ota_status = "deferred";
                         sharedTelemetry.ota_last_error = "Battery too low (<30%)";
                         xSemaphoreGive(stateMutex);
+                        reportOTAStage("deferred", "Battery too low for OTA", 0, pendingOTA.version);
                     }
                 }
             }
@@ -193,6 +250,8 @@ void markFirmwareValid() {
         writeNVSBootState(0);
         writeNVSBootAttempts(0);
         Serial.println("[OTA] New app validated successfully! Rollback cancelled.");
+        setOTAStatus("success", 100);
+        reportOTAStage("validated", "New firmware validated successfully", 100, String(FW_VERSION));
         reportSafetyEvent("OTA_SUCCESS", "{\"version\":\"" + String(FW_VERSION) + "\"}");
     }
 }
@@ -206,22 +265,15 @@ static void otaDownloadTask(void *pvParameters) {
     String version = pendingOTA.version;
     size_t expectedSize = pendingOTA.size;
 
-    xSemaphoreTake(stateMutex, portMAX_DELAY);
-    sharedTelemetry.ota_status = "downloading";
-    sharedTelemetry.ota_progress = 0;
-    sharedTelemetry.ota_last_error = "";
-    xSemaphoreGive(stateMutex);
+    setOTAStatus("downloading", 0);
+    reportOTAStage("download_initiated", "Download initiated", 0, version);
 
     Serial.printf("[OTA] Starting stream OTA. Target URL: %s, version: %s\n", url.c_str(), version.c_str());
 
     const esp_partition_t *update_partition = esp_ota_get_next_update_partition(NULL);
     if (update_partition == NULL) {
         Serial.println("[OTA] Error: Update partition target not found!");
-        xSemaphoreTake(stateMutex, portMAX_DELAY);
-        sharedTelemetry.ota_status = "failed";
-        sharedTelemetry.ota_last_error = "Partition not found";
-        xSemaphoreGive(stateMutex);
-        reportSafetyEvent("OTA_FAIL", "{\"reason\":\"partition_not_found\"}");
+        failOTA("partition_not_found", "OTA partition not found", version);
         otaRunning = false;
         vTaskDelete(NULL);
         return;
@@ -241,11 +293,7 @@ static void otaDownloadTask(void *pvParameters) {
     int httpCode = http.GET();
     if (httpCode != HTTP_CODE_OK) {
         Serial.printf("[OTA] HTTP GET Failed: %s\n", http.errorToString(httpCode).c_str());
-        xSemaphoreTake(stateMutex, portMAX_DELAY);
-        sharedTelemetry.ota_status = "failed";
-        sharedTelemetry.ota_last_error = "HTTP code " + String(httpCode);
-        xSemaphoreGive(stateMutex);
-        reportSafetyEvent("OTA_FAIL", "{\"reason\":\"http_error\",\"code\":" + String(httpCode) + "}");
+        failOTA("network_issue", "Network issue while downloading firmware", version, httpCode);
         http.end();
         otaRunning = false;
         vTaskDelete(NULL);
@@ -255,11 +303,7 @@ static void otaDownloadTask(void *pvParameters) {
     int contentLength = http.getSize();
     if (expectedSize > 0 && contentLength > 0 && (size_t)contentLength != expectedSize) {
         Serial.printf("[OTA] Content-Length mismatch: got %d, expected %d\n", contentLength, expectedSize);
-        xSemaphoreTake(stateMutex, portMAX_DELAY);
-        sharedTelemetry.ota_status = "failed";
-        sharedTelemetry.ota_last_error = "Size mismatch";
-        xSemaphoreGive(stateMutex);
-        reportSafetyEvent("OTA_FAIL", "{\"reason\":\"size_mismatch\"}");
+        failOTA("size_mismatch", "Firmware size mismatch", version);
         http.end();
         otaRunning = false;
         vTaskDelete(NULL);
@@ -270,11 +314,7 @@ static void otaDownloadTask(void *pvParameters) {
     esp_err_t err = esp_ota_begin(update_partition, contentLength, &ota_handle);
     if (err != ESP_OK) {
         Serial.printf("[OTA] esp_ota_begin failed: %s\n", esp_err_to_name(err));
-        xSemaphoreTake(stateMutex, portMAX_DELAY);
-        sharedTelemetry.ota_status = "failed";
-        sharedTelemetry.ota_last_error = "OTA start fail";
-        xSemaphoreGive(stateMutex);
-        reportSafetyEvent("OTA_FAIL", "{\"reason\":\"ota_begin_fail\",\"code\":" + String(err) + "}");
+        failOTA("ota_begin_fail", "OTA install could not start", version, (int)err);
         http.end();
         otaRunning = false;
         otaDownloadTaskHandle = NULL;
@@ -285,6 +325,8 @@ static void otaDownloadTask(void *pvParameters) {
     WiFiClient *stream = http.getStreamPtr();
     uint8_t buffer[4096]; // Increased read buffer from 1KB to 4KB for increased OTA throughput
     size_t total_written = 0;
+    int lastReportedProgress = -5;
+    bool streamFailed = false;
     
     // Stream directly into flash (low RAM consumption)
     while (http.connected() && (total_written < (size_t)contentLength || contentLength == -1)) {
@@ -295,23 +337,20 @@ static void otaDownloadTask(void *pvParameters) {
                 esp_err_t write_err = esp_ota_write(ota_handle, buffer, read_len);
                 if (write_err != ESP_OK) {
                     Serial.printf("[OTA] esp_ota_write failed: %s\n", esp_err_to_name(write_err));
-                    xSemaphoreTake(stateMutex, portMAX_DELAY);
-                    sharedTelemetry.ota_status = "failed";
-                    sharedTelemetry.ota_last_error = "Write failure";
-                    xSemaphoreGive(stateMutex);
-                    reportSafetyEvent("OTA_FAIL", "{\"reason\":\"flash_write_fail\"}");
+                    failOTA("flash_write_fail", "Flash write failed", version);
+                    streamFailed = true;
                     break;
                 }
                 total_written += read_len;
                 if (contentLength > 0) {
                     otaProgressPercent = (total_written * 100) / contentLength;
-                    xSemaphoreTake(stateMutex, portMAX_DELAY);
-                    sharedTelemetry.ota_progress = otaProgressPercent;
-                    xSemaphoreGive(stateMutex);
+                    setOTAStatus("downloading", otaProgressPercent);
 
-                    // Send periodic progress telemetry updates (approx every 10%)
-                    if (otaProgressPercent % 10 == 0) {
-                        reportSafetyEvent("OTA_PROGRESS", "{\"progress\":" + String(otaProgressPercent) + "}");
+                    // Send periodic real progress updates without flooding the cloud.
+                    if (otaProgressPercent >= lastReportedProgress + 5 || otaProgressPercent == 100) {
+                        lastReportedProgress = otaProgressPercent;
+                        reportSafetyEvent("OTA_PROGRESS", "{\"progress\":" + String(otaProgressPercent) + ",\"version\":\"" + version + "\"}");
+                        reportOTAStage("downloading", "Downloading firmware", otaProgressPercent, version);
                     }
                 }
             }
@@ -325,6 +364,9 @@ static void otaDownloadTask(void *pvParameters) {
 
     bool success = false;
     if (contentLength > 0 && total_written == (size_t)contentLength) {
+        setOTAStatus("installing", 95);
+        reportOTAStage("downloaded", "Firmware downloaded", 100, version);
+        reportOTAStage("installing", "Installing firmware image", 95, version);
         esp_err_t end_err = esp_ota_end(ota_handle);
         if (end_err == ESP_OK) {
             esp_err_t boot_err = esp_ota_set_boot_partition(update_partition);
@@ -332,35 +374,25 @@ static void otaDownloadTask(void *pvParameters) {
                 success = true;
             } else {
                 Serial.printf("[OTA] Failed to set boot partition: %s\n", esp_err_to_name(boot_err));
-                xSemaphoreTake(stateMutex, portMAX_DELAY);
-                sharedTelemetry.ota_status = "failed";
-                sharedTelemetry.ota_last_error = "Boot target swap failed";
-                xSemaphoreGive(stateMutex);
+                failOTA("boot_target_swap_failed", "Boot target swap failed", version, (int)boot_err);
             }
         } else {
             Serial.printf("[OTA] esp_ota_end failed: %s\n", esp_err_to_name(end_err));
-            xSemaphoreTake(stateMutex, portMAX_DELAY);
-            sharedTelemetry.ota_status = "failed";
-            sharedTelemetry.ota_last_error = "End verify fail";
-            xSemaphoreGive(stateMutex);
+            failOTA("corrupted_firmware", "Firmware image verification failed", version, (int)end_err);
         }
-    } else {
+    } else if (!streamFailed) {
         Serial.println("[OTA] Download truncated or aborted!");
         esp_ota_end(ota_handle);
-        xSemaphoreTake(stateMutex, portMAX_DELAY);
-        sharedTelemetry.ota_status = "failed";
-        sharedTelemetry.ota_last_error = "Download aborted";
-        xSemaphoreGive(stateMutex);
+        failOTA("download_aborted", "Download truncated or aborted", version);
     }
 
     if (success) {
         Serial.println("[OTA] OTA upgrade complete! Rebooting into target partition in 2 seconds...");
         writeNVSBootState(1);
         writeNVSBootAttempts(1);
-        xSemaphoreTake(stateMutex, portMAX_DELAY);
-        sharedTelemetry.ota_status = "rebooting";
-        sharedTelemetry.ota_progress = 100;
-        xSemaphoreGive(stateMutex);
+        setOTAStatus("rebooting", 100);
+        reportOTAStage("installed", "Firmware installed", 100, version);
+        reportOTAStage("reboot", "Rebooting into new firmware", 100, version);
         reportSafetyEvent("OTA_READY", "{\"version\":\"" + version + "\"}");
         vTaskDelay(pdMS_TO_TICKS(2000));
         esp_restart();
@@ -372,16 +404,23 @@ static void otaDownloadTask(void *pvParameters) {
     vTaskDelete(NULL);
 }
 
-void handleOTACommand(const String &url, const String &version, size_t size) {
+bool handleOTACommand(const String &url, const String &version, size_t size) {
     if (otaRunning) {
         Serial.println("[OTA] Rejected command: OTA task is actively downloading.");
-        return;
+        reportSafetyEvent("OTA_DEFERRED", "{\"reason\":\"already_in_progress\",\"target_version\":\"" + version + "\"}");
+        return false;
     }
 
-    // Refuse upgrade if target version matches running version (minimal validation)
+    // Refuse a no-op upgrade. This is reported through the same real device
+    // event stream as every other OTA outcome, so the operator never sees a
+    // browser-created "started" event without a matching device action.
     if (version == FW_VERSION) {
         Serial.println("[OTA] Rejected command: already running version " FW_VERSION);
-        return;
+        const String message = "Already running firmware v" + version;
+        setOTAStatus("deferred", 0, message);
+        reportOTAStage("skipped", message, 0, version);
+        reportSafetyEvent("OTA_DEFERRED", "{\"reason\":\"already_on_version\",\"target_version\":\"" + version + "\"}");
+        return false;
     }
 
     pendingOTA.url = url;
@@ -406,7 +445,7 @@ void handleOTACommand(const String &url, const String &version, size_t size) {
         pendingOTA.pending = true;
 
         reportSafetyEvent("OTA_DEFERRED", "{\"reason\":\"safety_interlocks\",\"target_version\":\"" + version + "\"}");
-        return;
+        return true;
     }
 
     // Enforce battery charge rule (>30% required to write to flash safely)
@@ -419,12 +458,21 @@ void handleOTACommand(const String &url, const String &version, size_t size) {
         pendingOTA.pending = true;
 
         reportSafetyEvent("OTA_DEFERRED", "{\"reason\":\"battery_low\",\"target_version\":\"" + version + "\"}");
-        return;
+        return true;
     }
 
     // Spawn download stream task at lowest priority (priority 1) pinned to Core 0 (Network/IO)
     pendingOTA.pending = false;
-    xTaskCreatePinnedToCore(otaDownloadTask, "ota_task", 12288, NULL, 1, &otaDownloadTaskHandle, 0);
+    enterOTAMaintenanceMode(version);
+    const BaseType_t taskCreated = xTaskCreatePinnedToCore(
+        otaDownloadTask, "ota_task", 12288, NULL, 1, &otaDownloadTaskHandle, 0
+    );
+    if (taskCreated != pdPASS) {
+        otaDownloadTaskHandle = NULL;
+        failOTA("task_start_failed", "OTA task could not start", version);
+        return false;
+    }
     
     reportSafetyEvent("OTA_STARTED", "{\"target_version\":\"" + version + "\"}");
+    return true;
 }

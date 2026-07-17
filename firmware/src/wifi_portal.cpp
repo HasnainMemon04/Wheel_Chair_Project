@@ -53,6 +53,26 @@ void saveWiFiCreds(const String &ssid, const String &pass) {
     Serial.printf("[Portal] Saved WiFi creds to NVS. SSID: %s\n", ssid.c_str());
 }
 
+bool resetSavedWiFiCredsOnce(const char *resetToken) {
+    prefs.begin("wifi", false);
+    const String appliedToken = prefs.getString("reset_token", "");
+    const bool needsReset = appliedToken != resetToken;
+
+    if (needsReset) {
+        prefs.remove("ssid");
+        prefs.remove("pass");
+        prefs.putString("reset_token", resetToken);
+    }
+
+    prefs.end();
+
+    if (needsReset) {
+        Serial.println("[Portal] Cleared saved WiFi credentials; using configured default network.");
+    }
+
+    return needsReset;
+}
+
 // --- Minimal, self-contained config page (no external assets) ---
 static const char PORTAL_HTML[] PROGMEM = R"HTML(
 <!DOCTYPE html><html lang="en"><head>

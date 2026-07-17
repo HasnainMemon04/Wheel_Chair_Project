@@ -154,15 +154,37 @@ void initSensors() {
     xSemaphoreTake(stateMutex, portMAX_DELAY);
     sharedTelemetry.uptime_s = 0;
     sharedTelemetry.gps_fix = false;
-    sharedTelemetry.gps_lat = 0.0;
-    sharedTelemetry.gps_lng = 0.0;
-    sharedTelemetry.gps_speed_kmh = 0.0;
+    sharedTelemetry.gps_simulated = true;
+    sharedTelemetry.gps_lat = 24.8601;
+    sharedTelemetry.gps_lng = 67.0637;
+    sharedTelemetry.gps_speed_kmh = 0.3f;
+    sharedTelemetry.gps_physical_lat = NAN;
+    sharedTelemetry.gps_physical_lng = NAN;
+    sharedTelemetry.gps_physical_speed_kmh = 0.0f;
+    sharedTelemetry.gps_physical_course_deg = NAN;
+    sharedTelemetry.gps_physical_altitude_m = NAN;
     sharedTelemetry.gps_sats = 0;
-    sharedTelemetry.gps_hdop = 99.0;
+    sharedTelemetry.gps_hdop = NAN;
+    sharedTelemetry.gps_course_deg = NAN;
+    sharedTelemetry.gps_altitude_m = NAN;
+    sharedTelemetry.gps_last_data_ms = 0;
+    sharedTelemetry.gps_last_fix_ms = 0;
+    sharedTelemetry.gps_chars_processed = 0;
+    sharedTelemetry.gps_sentences_valid = 0;
+    sharedTelemetry.gps_checksum_failures = 0;
+    sharedTelemetry.gps_nmea_gga[0] = '\0';
+    sharedTelemetry.gps_nmea_rmc[0] = '\0';
     sharedTelemetry.pitch = NAN;
     sharedTelemetry.roll = NAN;
     sharedTelemetry.tilt = NAN;
     sharedTelemetry.yaw = NAN;
+    sharedTelemetry.imu_accel_x_g = NAN;
+    sharedTelemetry.imu_accel_y_g = NAN;
+    sharedTelemetry.imu_accel_z_g = NAN;
+    sharedTelemetry.imu_gyro_x_dps = NAN;
+    sharedTelemetry.imu_gyro_y_dps = NAN;
+    sharedTelemetry.imu_gyro_z_dps = NAN;
+    sharedTelemetry.imu_last_sample_ms = 0;
     sharedTelemetry.temp_battery = NAN;
     sharedTelemetry.batt_v = 3.7;
     sharedTelemetry.batt_pct = 50;
@@ -256,122 +278,159 @@ void initSensors() {
     pinMode(BATT_ADC_PIN, INPUT);
 }
 
-// GPS task: Continuous read, parse NMEA
-
+// GPS task: physical NEO-M8N data is authoritative whenever a fresh fix is
+// available. Without a fix, the ESP32 emits a bounded, explicitly tagged
+// indoor fallback around the last physical fix (or the configured default).
 void gpsTask(void *pvParameters) {
     Serial.println("[Tasks] GPS Task started.");
 
-    // GPS simulation variables
-    unsigned long lastSimulateTime = 0;
-    double simLat = 24.860048;
-    double simLng = 67.063734;
+    char nmeaLine[128] = {0};
+    size_t nmeaLength = 0;
+    const uint32_t GPS_FIX_TIMEOUT_MS = 2000;
+    const uint32_t FALLBACK_UPDATE_MS = 200;
+    const double METERS_PER_DEGREE_LAT = 111320.0;
+    const double DEFAULT_FALLBACK_LAT = 24.8601;
+    const double DEFAULT_FALLBACK_LNG = 67.0637;
 
-    // Track when we last saw a VALID hardware fix. If the real GPS goes silent or loses
-    // its fix for longer than this, we clear gps_fix so simulation resumes (fixes the
-    // "stuck on last real coordinate after GPS desync" bug).
-    unsigned long lastHardwareFixTime = 0;
-    const unsigned long GPS_FIX_TIMEOUT_MS = 10000; // 10s without a valid fix => lost
+    double fallbackAnchorLat = DEFAULT_FALLBACK_LAT;
+    double fallbackAnchorLng = DEFAULT_FALLBACK_LNG;
+    float fallbackAngleRad = 0.0f;
+    uint32_t fallbackLastUpdateMs = millis();
+    bool physicalFixActive = false;
 
     while (true) {
         while (GPSSerial.available() > 0) {
-            gps.encode(GPSSerial.read());
-        }
+            const char c = static_cast<char>(GPSSerial.read());
+            gps.encode(c);
 
-        bool hasHardwareFix = false;
-
-        if (gps.location.isUpdated()) {
-            if (gps.location.isValid()) {
-                hasHardwareFix = true;
-                lastHardwareFixTime = millis();
-                double lat = gps.location.lat();
-                double lng = gps.location.lng();
-
-                xSemaphoreTake(stateMutex, portMAX_DELAY);
-                sharedTelemetry.gps_fix = true;
-                sharedTelemetry.gps_lat = lat;
-                sharedTelemetry.gps_lng = lng;
-                sharedTelemetry.gps_speed_kmh = gps.speed.kmph();
-                sharedTelemetry.gps_sats = gps.satellites.value();
-                sharedTelemetry.gps_hdop = gps.hdop.hdop();
-
-                // Calculate geofence distance locally
-                if (sharedTelemetry.gf.on) {
-                    double dist = calculateDistance(lat, lng, sharedTelemetry.gf.center_lat, sharedTelemetry.gf.center_lng);
-                    sharedTelemetry.gf.dist_m = dist;
-                    sharedTelemetry.gf.inside = (dist <= sharedTelemetry.gf.radius_m);
-                }
-                xSemaphoreGive(stateMutex);
-            }
-        }
-
-        // If we currently believe we have a fix but haven't seen a valid one recently,
-        // declare the fix lost so the simulation path below can take over again.
-        if (!hasHardwareFix) {
-            bool fixExpired = false;
-            xSemaphoreTake(stateMutex, portMAX_DELAY);
-            if (sharedTelemetry.gps_fix &&
-                (lastHardwareFixTime == 0 || (millis() - lastHardwareFixTime) > GPS_FIX_TIMEOUT_MS)) {
-                sharedTelemetry.gps_fix = false;
-                fixExpired = true;
-            }
-            xSemaphoreGive(stateMutex);
-            if (fixExpired) {
-                Serial.println("[Sensors] GPS fix lost (timeout). Resuming simulated location.");
-                // Seed the simulator from the last known real position for a smooth handover.
-                xSemaphoreTake(stateMutex, portMAX_DELAY);
-                simLat = sharedTelemetry.gps_lat;
-                simLng = sharedTelemetry.gps_lng;
-                xSemaphoreGive(stateMutex);
-                lastSimulateTime = 0; // force an immediate simulated update
-            }
-        }
-
-        // If no hardware fix, simulate coordinates with random micro-movements every 5 seconds
-        if (!hasHardwareFix) {
-            unsigned long now = millis();
-            if (now - lastSimulateTime >= 5000) {
-                lastSimulateTime = now;
-
-                // Generate a random step (between 0.1 to 1.0 meters displacement)
-                // 1 meter = 0.000009 degrees.
-                float latOffsetMeters = ((rand() % 200) - 100) / 100.0f; // -1.0 to 1.0
-                float lngOffsetMeters = ((rand() % 200) - 100) / 100.0f; // -1.0 to 1.0
-
-                simLat += latOffsetMeters * 0.000009;
-                simLng += lngOffsetMeters * 0.000009;
-
-                xSemaphoreTake(stateMutex, portMAX_DELAY);
-                // Only write if a real hardware fix hasn't taken over in the meantime
-                if (!sharedTelemetry.gps_fix) {
-                    sharedTelemetry.gps_lat = simLat;
-                    sharedTelemetry.gps_lng = simLng;
-                    if (sharedTelemetry.session_state == "LOCKED" || sharedTelemetry.session_state == "IDLE") {
-                        sharedTelemetry.gps_speed_kmh = 0.0f;
-                    } else {
-                        // Simulate a very slow speed: mostly 0.0 - 0.6 km/h, up to 1.2 km/h
-                        float rSpeed = (rand() % 100) / 100.0f; // 0.0 to 1.0
-                        if (rSpeed < 0.7f) {
-                            // 70% chance of 0.0 to 0.6 km/h
-                            sharedTelemetry.gps_speed_kmh = (rand() % 7) / 10.0f;
-                        } else {
-                            // 30% chance of 0.6 to 1.2 km/h
-                            sharedTelemetry.gps_speed_kmh = 0.6f + (rand() % 7) / 10.0f;
-                        }
+            if (c == '\n') {
+                nmeaLine[nmeaLength] = '\0';
+                if (nmeaLength > 0) {
+                    xSemaphoreTake(stateMutex, portMAX_DELAY);
+                    sharedTelemetry.gps_last_data_ms = millis();
+                    if (strstr(nmeaLine, "GGA,") != nullptr) {
+                        strncpy(sharedTelemetry.gps_nmea_gga, nmeaLine, sizeof(sharedTelemetry.gps_nmea_gga) - 1);
+                        sharedTelemetry.gps_nmea_gga[sizeof(sharedTelemetry.gps_nmea_gga) - 1] = '\0';
+                    } else if (strstr(nmeaLine, "RMC,") != nullptr) {
+                        strncpy(sharedTelemetry.gps_nmea_rmc, nmeaLine, sizeof(sharedTelemetry.gps_nmea_rmc) - 1);
+                        sharedTelemetry.gps_nmea_rmc[sizeof(sharedTelemetry.gps_nmea_rmc) - 1] = '\0';
                     }
-
-                    sharedTelemetry.gps_sats = 8;
-                    sharedTelemetry.gps_hdop = 1.1;
-
-                    // Calculate geofence distance locally
-                    if (sharedTelemetry.gf.on) {
-                        double dist = calculateDistance(simLat, simLng, sharedTelemetry.gf.center_lat, sharedTelemetry.gf.center_lng);
-                        sharedTelemetry.gf.dist_m = dist;
-                        sharedTelemetry.gf.inside = (dist <= sharedTelemetry.gf.radius_m);
-                    }
+                    xSemaphoreGive(stateMutex);
                 }
-                xSemaphoreGive(stateMutex);
+                nmeaLength = 0;
+            } else if (c != '\r' && nmeaLength < sizeof(nmeaLine) - 1) {
+                nmeaLine[nmeaLength++] = c;
             }
         }
+
+        const uint32_t now = millis();
+        const bool hasFreshFix =
+            gps.location.isValid() &&
+            gps.location.age() <= GPS_FIX_TIMEOUT_MS;
+
+        xSemaphoreTake(stateMutex, portMAX_DELAY);
+        sharedTelemetry.gps_chars_processed = gps.charsProcessed();
+        sharedTelemetry.gps_sentences_valid = gps.passedChecksum();
+        sharedTelemetry.gps_checksum_failures = gps.failedChecksum();
+
+        if (gps.satellites.isValid()) {
+            sharedTelemetry.gps_sats = gps.satellites.value();
+        }
+        if (gps.hdop.isValid()) {
+            sharedTelemetry.gps_hdop = gps.hdop.hdop();
+        }
+        if (gps.course.isValid()) {
+            sharedTelemetry.gps_course_deg = gps.course.deg();
+        }
+        if (gps.altitude.isValid()) {
+            sharedTelemetry.gps_altitude_m = gps.altitude.meters();
+        }
+
+        sharedTelemetry.gps_fix = hasFreshFix;
+        if (hasFreshFix) {
+            sharedTelemetry.gps_lat = gps.location.lat();
+            sharedTelemetry.gps_lng = gps.location.lng();
+            sharedTelemetry.gps_speed_kmh = gps.speed.isValid() ? gps.speed.kmph() : 0.0f;
+            sharedTelemetry.gps_physical_lat = sharedTelemetry.gps_lat;
+            sharedTelemetry.gps_physical_lng = sharedTelemetry.gps_lng;
+            sharedTelemetry.gps_physical_speed_kmh = sharedTelemetry.gps_speed_kmh;
+            sharedTelemetry.gps_physical_course_deg =
+                gps.course.isValid() ? gps.course.deg() : NAN;
+            sharedTelemetry.gps_physical_altitude_m =
+                gps.altitude.isValid() ? gps.altitude.meters() : NAN;
+            sharedTelemetry.gps_last_fix_ms = now - gps.location.age();
+            sharedTelemetry.gps_simulated = false;
+
+            fallbackAnchorLat = sharedTelemetry.gps_lat;
+            fallbackAnchorLng = sharedTelemetry.gps_lng;
+            fallbackLastUpdateMs = now;
+
+            if (!physicalFixActive) {
+                Serial.printf(
+                    "[GPS] Physical fix acquired. Using NEO-M8N at %.6f, %.6f.\n",
+                    sharedTelemetry.gps_lat,
+                    sharedTelemetry.gps_lng
+                );
+            }
+            physicalFixActive = true;
+
+            if (sharedTelemetry.gf.on) {
+                const double dist = calculateDistance(
+                    sharedTelemetry.gps_lat,
+                    sharedTelemetry.gps_lng,
+                    sharedTelemetry.gf.center_lat,
+                    sharedTelemetry.gf.center_lng
+                );
+                sharedTelemetry.gf.dist_m = dist;
+                sharedTelemetry.gf.inside = (dist <= sharedTelemetry.gf.radius_m);
+            }
+        } else {
+            if (physicalFixActive) {
+                Serial.printf(
+                    "[GPS] Physical fix lost. Display continuity anchored at %.6f, %.6f.\n",
+                    fallbackAnchorLat,
+                    fallbackAnchorLng
+                );
+                fallbackLastUpdateMs = now;
+            }
+            physicalFixActive = false;
+            sharedTelemetry.gps_simulated = true;
+            sharedTelemetry.gps_physical_lat = NAN;
+            sharedTelemetry.gps_physical_lng = NAN;
+            sharedTelemetry.gps_physical_speed_kmh = 0.0f;
+            sharedTelemetry.gps_physical_course_deg = NAN;
+            sharedTelemetry.gps_physical_altitude_m = NAN;
+
+            if (now - fallbackLastUpdateMs >= FALLBACK_UPDATE_MS) {
+                const float elapsedSeconds = (now - fallbackLastUpdateMs) / 1000.0f;
+                fallbackLastUpdateMs = now;
+
+                // Both values vary slowly but remain inside the requested
+                // bounds: 1-5 m radius and 0.1-0.5 km/h display speed.
+                const float speedKmh = 0.3f + 0.2f * sinf(now * 0.00035f);
+                const float radiusM = 3.0f + 2.0f * sinf(now * 0.00019f + 1.3f);
+                const float angularVelocity = (speedKmh / 3.6f) / max(radiusM, 1.0f);
+                fallbackAngleRad = fmodf(
+                    fallbackAngleRad + angularVelocity * elapsedSeconds,
+                    2.0f * PI
+                );
+
+                const double northOffsetM = radiusM * sinf(fallbackAngleRad);
+                const double eastOffsetM = radiusM * cosf(fallbackAngleRad);
+                const double metersPerDegreeLng =
+                    METERS_PER_DEGREE_LAT * cos(fallbackAnchorLat * DEG_TO_RAD);
+
+                sharedTelemetry.gps_lat =
+                    fallbackAnchorLat + northOffsetM / METERS_PER_DEGREE_LAT;
+                sharedTelemetry.gps_lng =
+                    fallbackAnchorLng + eastOffsetM / metersPerDegreeLng;
+                sharedTelemetry.gps_speed_kmh = speedKmh;
+                sharedTelemetry.gps_course_deg =
+                    fmodf(fallbackAngleRad * RAD_TO_DEG + 90.0f, 360.0f);
+                sharedTelemetry.gps_altitude_m = NAN;
+            }
+        }
+        xSemaphoreGive(stateMutex);
 
         vTaskDelay(pdMS_TO_TICKS(10));
     }
@@ -385,6 +444,13 @@ void readIMU() {
         sharedTelemetry.roll = NAN;
         sharedTelemetry.yaw = NAN;
         sharedTelemetry.tilt = NAN;
+        sharedTelemetry.imu_accel_x_g = NAN;
+        sharedTelemetry.imu_accel_y_g = NAN;
+        sharedTelemetry.imu_accel_z_g = NAN;
+        sharedTelemetry.imu_gyro_x_dps = NAN;
+        sharedTelemetry.imu_gyro_y_dps = NAN;
+        sharedTelemetry.imu_gyro_z_dps = NAN;
+        sharedTelemetry.imu_last_sample_ms = 0;
         sharedTelemetry.vibration_state = false;
         xSemaphoreGive(stateMutex);
         return;
@@ -453,6 +519,13 @@ void readIMU() {
         smoothAccDiff = 0.95f * smoothAccDiff + 0.05f * accDiff;
 
         xSemaphoreTake(stateMutex, portMAX_DELAY);
+        sharedTelemetry.imu_accel_x_g = ax;
+        sharedTelemetry.imu_accel_y_g = ay;
+        sharedTelemetry.imu_accel_z_g = az;
+        sharedTelemetry.imu_gyro_x_dps = gx;
+        sharedTelemetry.imu_gyro_y_dps = gy;
+        sharedTelemetry.imu_gyro_z_dps = gz;
+        sharedTelemetry.imu_last_sample_ms = millis();
         sharedTelemetry.pitch = g_pitch_cf;
         sharedTelemetry.roll = g_roll_cf;
         sharedTelemetry.yaw = g_yaw_cf;

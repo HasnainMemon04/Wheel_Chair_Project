@@ -161,6 +161,7 @@ void safetySupervisorTask(void *pvParameters) {
         String state = sharedTelemetry.session_state;
         int timeLeft = sharedTelemetry.time_left_s;
         float speedGps = sharedTelemetry.gps_speed_kmh;
+        bool gpsFix = sharedTelemetry.gps_fix;
         bool vibrationActive = sharedTelemetry.vibration_state;
         bool insideGf = sharedTelemetry.gf.inside;
         float gfDist = sharedTelemetry.gf.dist_m;
@@ -318,13 +319,13 @@ void safetySupervisorTask(void *pvParameters) {
             }
 
             // Geofence enforcement locally
-            if (gfOn && !insideGf) {
+            if (gfOn && gpsFix && !insideGf) {
                 if (!geofenceExitLatched) {
                     geofenceExitLatched = true;
                     reportSafetyEvent("GEOFENCE_EXIT", "{\"dist\":" + String(gfDist) + ",\"radius\":" + String(gfRadius) + "}");
                     Serial.println("[Safety] GEOFENCE_EXIT! Device is outside authorized boundary.");
                 }
-            } else if (insideGf && geofenceExitLatched) {
+            } else if (gpsFix && insideGf && geofenceExitLatched) {
                 geofenceExitLatched = false;
                 reportSafetyEvent("GEOFENCE_ENTER", "{}");
                 Serial.println("[Safety] GEOFENCE_ENTER. Returned to safety zone.");

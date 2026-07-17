@@ -124,6 +124,11 @@ void initNetwork() {
     WiFi.mode(WIFI_MODE_STA);
     WiFi.disconnect();
 
+    // Reset the previous temporary network (Gemnet-BB) once, then load the
+    // original configured network. The token prevents subsequent reboots from
+    // overwriting credentials entered later through the provisioning portal.
+    resetSavedWiFiCredsOnce("restore-config-default-2026-07-18");
+
     // Load WiFi credentials: NVS-saved first, else config.h defaults.
     bool haveSaved = loadSavedWiFiCreds(activeSSID, activePASS);
     Serial.printf("[Network] Using %s WiFi creds. SSID: %s\n",
@@ -138,8 +143,10 @@ void initNetwork() {
     // Create the mutex to serialize all HTTPS transactions
     wifiClientMutex = xSemaphoreCreateMutex();
 
-    // Decoupled queue for safety supervisor events (size 5, non-blocking writes)
-    safetyEventQueue = xQueueCreate(5, sizeof(SafetyEvent));
+    // Decoupled queue for safety supervisor / OTA events (non-blocking writes).
+    // A complete OTA sends every major stage plus 5% download updates. Keep the
+    // full timeline buffered while HTTPS uploads drain it on a weak connection.
+    safetyEventQueue = xQueueCreate(64, sizeof(SafetyEvent));
 }
 
 // WiFi Monitor Task: connect with saved creds; after repeated failures open the
@@ -308,6 +315,13 @@ void uploadSafetyEvent(const char* eventType, const char* detailJson) {
     int code = performHTTPSRequest(url, "POST", jsonPayload, signature, response);
     if (code == 200) {
         Serial.printf("[Network] Successfully reported event: %s\n", eventType);
+    } else {
+        Serial.printf(
+            "[Network] Event upload failed: %s | HTTP %d | Response: %.240s\n",
+            eventType,
+            code,
+            response.c_str()
+        );
     }
 }
 
@@ -354,16 +368,37 @@ void uploadTelemetryTask(void *pvParameters) {
             doc["fw"] = FW_VERSION;
             doc["up"] = localData.uptime_s; // uptime, NOT a timestamp
             doc["fix"] = localData.gps_fix ? 1 : 0;
+            doc["gps_simulated"] = localData.gps_simulated ? 1 : 0;
             doc["lat"] = localData.gps_lat;
             doc["lng"] = localData.gps_lng;
             doc["spd"] = localData.gps_speed_kmh;
             doc["sats"] = localData.gps_sats;
             doc["hdop"] = localData.gps_hdop;
+            doc["gps_fix"] = localData.gps_fix ? 1 : 0;
+            setJsonFloat(doc, "gps_course", localData.gps_course_deg);
+            setJsonFloat(doc, "gps_altitude", localData.gps_altitude_m);
+            doc["gps_age_ms"] = localData.gps_last_data_ms > 0
+                ? static_cast<int32_t>(millis() - localData.gps_last_data_ms)
+                : -1;
+            doc["gps_chars"] = localData.gps_chars_processed;
+            doc["gps_sentences"] = localData.gps_sentences_valid;
+            doc["gps_checksum_failures"] = localData.gps_checksum_failures;
+            doc["gps_nmea_gga"] = localData.gps_nmea_gga;
+            doc["gps_nmea_rmc"] = localData.gps_nmea_rmc;
             
             setJsonFloat(doc, "pitch", localData.pitch);
             setJsonFloat(doc, "roll", localData.roll);
             setJsonFloat(doc, "tilt", localData.tilt);
             setJsonFloat(doc, "yaw", localData.yaw);
+            setJsonFloat(doc, "imu_accel_x", localData.imu_accel_x_g);
+            setJsonFloat(doc, "imu_accel_y", localData.imu_accel_y_g);
+            setJsonFloat(doc, "imu_accel_z", localData.imu_accel_z_g);
+            setJsonFloat(doc, "imu_gyro_x", localData.imu_gyro_x_dps);
+            setJsonFloat(doc, "imu_gyro_y", localData.imu_gyro_y_dps);
+            setJsonFloat(doc, "imu_gyro_z", localData.imu_gyro_z_dps);
+            doc["imu_age_ms"] = localData.imu_last_sample_ms > 0
+                ? static_cast<int32_t>(millis() - localData.imu_last_sample_ms)
+                : -1;
             setJsonFloat(doc, "temp_batt", localData.temp_battery);
             
             doc["batt_v"] = localData.batt_v;
@@ -436,8 +471,9 @@ void uploadTelemetryTask(void *pvParameters) {
             unsigned int netW    = (networkTaskHandle != NULL) ? uxTaskGetStackHighWaterMark(networkTaskHandle) : 9999;
             unsigned int telW    = (uploadTelemetryTaskHandle != NULL) ? uxTaskGetStackHighWaterMark(uploadTelemetryTaskHandle) : 9999;
 
-            Serial.printf("[Heartbeat] Version: %s | Uptime: %ds | Free Heap: %d bytes | RSSI: %d | Last HTTP: %d | GPS Fix: %s\n",
-                          FW_VERSION, localData.uptime_s, ESP.getFreeHeap(), localData.wifi_rssi, lastUploadCode, localData.gps_fix ? "YES" : "NO");
+            Serial.printf("[Heartbeat] Version: %s | Uptime: %ds | Free Heap: %d bytes | RSSI: %d | Last HTTP: %d | GPS: %s\n",
+                          FW_VERSION, localData.uptime_s, ESP.getFreeHeap(), localData.wifi_rssi, lastUploadCode,
+                          localData.gps_fix ? "FIX" : "NO_FIX");
             Serial.printf("[Battery] Voltage: %.2fV | Percent: %d%%\n", localData.batt_v, localData.batt_pct);
             Serial.printf("[CPU Load] Core 0 (Net/IO): %d%% | Core 1 (App/RT): %d%%\n", cpu0Load, cpu1Load);
             Serial.printf("[Stack HighWater] SafetySup: %u | SensPoll: %u | GPS: %u | Temp: %u | Net: %u | Telemetry: %u | OTADown: %u | OTASched: %u | OTAWatch: %u (words)\n",
@@ -588,26 +624,89 @@ void processCommands(const String &jsonResponse) {
             clearTamper();
             ok = true;
         } else if (cmd == "DIAGNOSTIC_RUN") {
-            // Read status variables safely under mutex
-            String imuStatus = mpuOK ? "OK" : "FAIL";
-            bool gpsFix = sharedTelemetry.gps_fix;
-            String gpsStatus = gpsFix ? "OK" : "NO_FIX";
-            int sats = sharedTelemetry.gps_sats;
-            float hdop = sharedTelemetry.gps_hdop;
-            double lat = sharedTelemetry.gps_lat;
-            double lng = sharedTelemetry.gps_lng;
-            
-            // Build raw status summary sentence
-            char rawDbg[256];
-            snprintf(rawDbg, sizeof(rawDbg), 
-                     "IMU: MPU6500 %s. GPS: Neo-M8N %s, Sats: %d, HDOP: %.2f. Lat/Lng: %.6f, %.6f",
-                     imuStatus.c_str(), gpsStatus.c_str(), sats, hdop, lat, lng);
-            
-            // Create JSON detail string
-            String detailJson = "{\"imu_status\":\"" + imuStatus + "\",\"gps_status\":\"" + gpsStatus + "\",\"gps_sats\":" + String(sats) + ",\"gps_hdop\":" + String(hdop) + ",\"raw_text\":\"" + String(rawDbg) + "\"}";
-            
-            // uploadSafetyEvent takes stateMutex internally. Release it here to avoid deadlock.
+            const TelemetryData diagnostic = sharedTelemetry;
+            const bool imuConnected = mpuOK && diagnostic.imu_last_sample_ms > 0;
+            const int32_t gpsAgeMs = diagnostic.gps_last_data_ms > 0
+                ? static_cast<int32_t>(millis() - diagnostic.gps_last_data_ms)
+                : -1;
+            const int32_t imuAgeMs = diagnostic.imu_last_sample_ms > 0
+                ? static_cast<int32_t>(millis() - diagnostic.imu_last_sample_ms)
+                : -1;
+            const bool gpsConnected = gpsAgeMs >= 0 && gpsAgeMs <= 3000;
+
+            // Release the state lock before JSON allocation and HTTPS upload.
             xSemaphoreGive(stateMutex);
+
+            JsonDocument detailDoc;
+            detailDoc["schema_version"] = 4;
+            detailDoc["source"] = "esp32s3";
+            detailDoc["captured_uptime_s"] = diagnostic.uptime_s;
+            detailDoc["imu_status"] = imuConnected ? "OK" : "FAIL";
+            detailDoc["gps_status"] = !gpsConnected ? "NO_DATA" : (diagnostic.gps_fix ? "FIX" : "NO_FIX");
+            detailDoc["gps_sats"] = diagnostic.gps_sats;
+            if (isnan(diagnostic.gps_hdop)) detailDoc["gps_hdop"] = nullptr;
+            else detailDoc["gps_hdop"] = diagnostic.gps_hdop;
+
+            JsonObject gpsDetail = detailDoc["gps"].to<JsonObject>();
+            gpsDetail["model"] = "NEO-M8N";
+            gpsDetail["connected"] = gpsConnected;
+            gpsDetail["fix"] = diagnostic.gps_fix;
+            gpsDetail["source"] = "neo_m8n";
+            gpsDetail["data_age_ms"] = gpsAgeMs;
+            gpsDetail["satellites"] = diagnostic.gps_sats;
+            gpsDetail["chars_processed"] = diagnostic.gps_chars_processed;
+            gpsDetail["sentences_valid"] = diagnostic.gps_sentences_valid;
+            gpsDetail["checksum_failures"] = diagnostic.gps_checksum_failures;
+            if (isnan(diagnostic.gps_physical_lat)) gpsDetail["latitude"] = nullptr;
+            else gpsDetail["latitude"] = diagnostic.gps_physical_lat;
+            if (isnan(diagnostic.gps_physical_lng)) gpsDetail["longitude"] = nullptr;
+            else gpsDetail["longitude"] = diagnostic.gps_physical_lng;
+            gpsDetail["speed_kmh"] = diagnostic.gps_physical_speed_kmh;
+            if (isnan(diagnostic.gps_hdop)) gpsDetail["hdop"] = nullptr;
+            else gpsDetail["hdop"] = diagnostic.gps_hdop;
+            if (isnan(diagnostic.gps_physical_course_deg)) gpsDetail["course_deg"] = nullptr;
+            else gpsDetail["course_deg"] = diagnostic.gps_physical_course_deg;
+            if (isnan(diagnostic.gps_physical_altitude_m)) gpsDetail["altitude_m"] = nullptr;
+            else gpsDetail["altitude_m"] = diagnostic.gps_physical_altitude_m;
+
+            JsonArray nmeaDetail = gpsDetail["nmea"].to<JsonArray>();
+            if (diagnostic.gps_nmea_gga[0] != '\0') nmeaDetail.add(diagnostic.gps_nmea_gga);
+            if (diagnostic.gps_nmea_rmc[0] != '\0') nmeaDetail.add(diagnostic.gps_nmea_rmc);
+
+            JsonObject imuDetail = detailDoc["imu"].to<JsonObject>();
+            imuDetail["model"] = "MPU6500";
+            imuDetail["connected"] = imuConnected;
+            imuDetail["data_age_ms"] = imuAgeMs;
+            imuDetail["motion"] = diagnostic.vibration_state;
+
+            JsonObject accelDetail = imuDetail["accel_g"].to<JsonObject>();
+            if (isnan(diagnostic.imu_accel_x_g)) accelDetail["x"] = nullptr;
+            else accelDetail["x"] = diagnostic.imu_accel_x_g;
+            if (isnan(diagnostic.imu_accel_y_g)) accelDetail["y"] = nullptr;
+            else accelDetail["y"] = diagnostic.imu_accel_y_g;
+            if (isnan(diagnostic.imu_accel_z_g)) accelDetail["z"] = nullptr;
+            else accelDetail["z"] = diagnostic.imu_accel_z_g;
+
+            JsonObject gyroDetail = imuDetail["gyro_dps"].to<JsonObject>();
+            if (isnan(diagnostic.imu_gyro_x_dps)) gyroDetail["x"] = nullptr;
+            else gyroDetail["x"] = diagnostic.imu_gyro_x_dps;
+            if (isnan(diagnostic.imu_gyro_y_dps)) gyroDetail["y"] = nullptr;
+            else gyroDetail["y"] = diagnostic.imu_gyro_y_dps;
+            if (isnan(diagnostic.imu_gyro_z_dps)) gyroDetail["z"] = nullptr;
+            else gyroDetail["z"] = diagnostic.imu_gyro_z_dps;
+
+            JsonObject orientationDetail = imuDetail["orientation_deg"].to<JsonObject>();
+            if (isnan(diagnostic.pitch)) orientationDetail["pitch"] = nullptr;
+            else orientationDetail["pitch"] = diagnostic.pitch;
+            if (isnan(diagnostic.roll)) orientationDetail["roll"] = nullptr;
+            else orientationDetail["roll"] = diagnostic.roll;
+            if (isnan(diagnostic.yaw)) orientationDetail["yaw"] = nullptr;
+            else orientationDetail["yaw"] = diagnostic.yaw;
+            if (isnan(diagnostic.tilt)) orientationDetail["tilt"] = nullptr;
+            else orientationDetail["tilt"] = diagnostic.tilt;
+
+            String detailJson;
+            serializeJson(detailDoc, detailJson);
             uploadSafetyEvent("DIAGNOSTIC_RESULT", detailJson.c_str());
             xSemaphoreTake(stateMutex, portMAX_DELAY);
             ok = true;
@@ -639,16 +738,21 @@ void processCommands(const String &jsonResponse) {
             sharedTelemetry.gf.center_lng = lc.lng;
             sharedTelemetry.gf.radius_m = lc.radius;
             sharedTelemetry.gf.on = true;
-            // Recalculate inside/outside status immediately
-            double dist = calculateDistance(sharedTelemetry.gps_lat, sharedTelemetry.gps_lng, lc.lat, lc.lng);
-            sharedTelemetry.gf.dist_m = dist;
-            sharedTelemetry.gf.inside = (dist <= lc.radius);
+            // A fallback coordinate is display continuity, not geofence
+            // evidence. Defer enforcement until the next physical GPS fix.
+            if (sharedTelemetry.gps_fix) {
+                double dist = calculateDistance(sharedTelemetry.gps_lat, sharedTelemetry.gps_lng, lc.lat, lc.lng);
+                sharedTelemetry.gf.dist_m = dist;
+                sharedTelemetry.gf.inside = (dist <= lc.radius);
+            } else {
+                sharedTelemetry.gf.dist_m = 0.0f;
+                sharedTelemetry.gf.inside = true;
+            }
             ok = true;
         } else if (cmd == "OTA") {
             xSemaphoreGive(stateMutex);
-            handleOTACommand(lc.ota_url, lc.ota_version, lc.ota_size);
+            ok = handleOTACommand(lc.ota_url, lc.ota_version, lc.ota_size);
             xSemaphoreTake(stateMutex, portMAX_DELAY);
-            ok = true;
         } else if (cmd == "PING") {
             ok = true;
         } else {

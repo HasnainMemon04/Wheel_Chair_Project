@@ -3,13 +3,15 @@
 import { useState, useEffect } from 'react';
 import dynamic from 'next/dynamic';
 import { motion, AnimatePresence } from 'framer-motion';
-import { useFleetState } from '../../hooks/useFleetState';
+import { type SafetyEvent, useFleetState } from '../../hooks/useFleetState';
 import { supabase } from '../../utils/supabase';
 import {
   Zap, Battery, ShieldAlert, Thermometer, Radio,
   MapPin, Sliders, Play, Square, Unlock, Lock, RefreshCw, AlertTriangle, ShieldOff, Trash2, Activity
 } from 'lucide-react';
 import Link from 'next/link';
+
+const DISMISSED_FEED_EVENTS_KEY = 'wheelchair-console-dismissed-feed-events';
 
 // Dynamic import to bypass Next.js SSR window check
 const Map = dynamic(() => import('../../components/Map'), {
@@ -22,8 +24,163 @@ const Map = dynamic(() => import('../../components/Map'), {
   )
 });
 
+function isQueuedOtaRequest(event: SafetyEvent) {
+  if (event.type !== 'OTA_REQUESTED' || !event.detail || typeof event.detail !== 'object' || Array.isArray(event.detail)) {
+    return false;
+  }
+
+  return (event.detail as Record<string, unknown>).source === 'operator_console';
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function formatSensorValue(value: unknown, digits = 2, fallback = '--') {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? value.toFixed(digits)
+    : fallback;
+}
+
+function DiagnosticResult({
+  event,
+  pending,
+  error
+}: {
+  event?: SafetyEvent;
+  pending: boolean;
+  error: string | null;
+}) {
+  if (pending) {
+    return (
+      <div className="flex items-center justify-center gap-2 border-t border-zinc-900 py-3 text-[10px] font-semibold text-blue-300">
+        <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+        Waiting for live ESP32 sensor snapshot...
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="border-t border-zinc-900 pt-2.5 text-[10px] font-semibold text-red-300">
+        {error}
+      </div>
+    );
+  }
+
+  if (!event) {
+    return (
+      <div className="text-center py-1 text-[10px] text-zinc-500">
+        No diagnostics run yet.
+      </div>
+    );
+  }
+
+  const detail = asRecord(event.detail);
+  const gps = asRecord(detail.gps);
+  const imu = asRecord(detail.imu);
+  const accel = asRecord(imu.accel_g);
+  const gyro = asRecord(imu.gyro_dps);
+  const orientation = asRecord(imu.orientation_deg);
+  const nmea = Array.isArray(gps.nmea)
+    ? gps.nmea.filter((line): line is string => typeof line === 'string' && line.length > 0)
+    : [];
+
+  const realSnapshot =
+    detail.source === 'esp32s3' &&
+    typeof detail.schema_version === 'number' &&
+    detail.schema_version >= 2;
+  const gpsConnected = gps.connected === true;
+  const gpsFix = gps.fix === true;
+  const imuConnected = imu.connected === true || detail.imu_status === 'OK';
+  const gpsStatus = gpsFix ? '3D FIX' : !gpsConnected ? 'NO DATA' : 'NO FIX';
+
+  return (
+    <div className="space-y-3 border-t border-zinc-900 pt-3">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[9px] font-bold uppercase tracking-wider text-zinc-500">Live sensor snapshot</span>
+        <span className={`rounded px-1.5 py-0.5 text-[8px] font-black uppercase tracking-wider ${
+          realSnapshot ? 'bg-emerald-500/10 text-emerald-300' : 'bg-amber-500/10 text-amber-300'
+        }`}>
+          {realSnapshot ? 'Real ESP32' : 'Legacy result'}
+        </span>
+      </div>
+
+      <section className="space-y-2 border-b border-zinc-900 pb-3">
+        <div className="flex items-center justify-between">
+          <span className="text-[9px] font-black uppercase tracking-wider text-zinc-300">NEO-M8N GPS</span>
+          <span className={`text-[9px] font-black ${
+            gpsFix ? 'text-emerald-300' : gpsConnected ? 'text-amber-300' : 'text-red-300'
+          }`}>
+            {gpsStatus}
+          </span>
+        </div>
+
+        <div className="grid grid-cols-2 gap-x-3 gap-y-2 font-mono text-[9px]">
+          <div><span className="block text-zinc-600">Latitude</span><span className="text-zinc-200">{gpsFix ? formatSensorValue(gps.latitude, 6) : '--'}</span></div>
+          <div><span className="block text-zinc-600">Longitude</span><span className="text-zinc-200">{gpsFix ? formatSensorValue(gps.longitude, 6) : '--'}</span></div>
+          <div><span className="block text-zinc-600">Satellites</span><span className="text-zinc-200">{formatSensorValue(gps.satellites, 0)}</span></div>
+          <div><span className="block text-zinc-600">HDOP</span><span className="text-zinc-200">{formatSensorValue(gps.hdop)}</span></div>
+          <div><span className="block text-zinc-600">Speed km/h</span><span className="text-zinc-200">{formatSensorValue(gps.speed_kmh)}</span></div>
+          <div><span className="block text-zinc-600">Altitude m</span><span className="text-zinc-200">{formatSensorValue(gps.altitude_m)}</span></div>
+          <div><span className="block text-zinc-600">Course deg</span><span className="text-zinc-200">{formatSensorValue(gps.course_deg)}</span></div>
+          <div><span className="block text-zinc-600">Data age</span><span className="text-zinc-200">{formatSensorValue(gps.data_age_ms, 0)} ms</span></div>
+        </div>
+
+        <div className="flex flex-wrap gap-x-3 gap-y-1 text-[8px] font-semibold text-zinc-500">
+          <span>Chars {formatSensorValue(gps.chars_processed, 0)}</span>
+          <span>Valid {formatSensorValue(gps.sentences_valid, 0)}</span>
+          <span>Checksum errors {formatSensorValue(gps.checksum_failures, 0)}</span>
+        </div>
+
+        <div>
+          <div className="mb-1 text-[8px] font-bold uppercase tracking-wider text-zinc-600">Raw NMEA from UART</div>
+          <pre className="max-h-32 overflow-auto whitespace-pre-wrap break-all rounded-md border border-zinc-800 bg-black/30 p-2 font-mono text-[8px] leading-relaxed text-cyan-200">
+            {nmea.length > 0 ? nmea.join('\n') : 'No GGA/RMC sentence received from the GPS UART.'}
+          </pre>
+        </div>
+      </section>
+
+      <section className="space-y-2">
+        <div className="flex items-center justify-between">
+          <span className="text-[9px] font-black uppercase tracking-wider text-zinc-300">MPU6500 IMU</span>
+          <span className={`text-[9px] font-black ${imuConnected ? 'text-emerald-300' : 'text-red-300'}`}>
+            {imuConnected ? 'STREAMING' : 'NO DATA'}
+          </span>
+        </div>
+
+        <div className="grid grid-cols-4 gap-1 font-mono text-[8px]">
+          {(['pitch', 'roll', 'yaw', 'tilt'] as const).map((axis) => (
+            <div key={axis} className="min-w-0 border-l border-zinc-800 pl-1.5">
+              <span className="block uppercase text-zinc-600">{axis}</span>
+              <span className="text-zinc-200">{formatSensorValue(orientation[axis])}°</span>
+            </div>
+          ))}
+        </div>
+
+        <div className="grid grid-cols-2 gap-3 font-mono text-[8px]">
+          <div>
+            <span className="mb-1 block font-sans font-bold uppercase tracking-wider text-zinc-600">Acceleration (g)</span>
+            <div className="flex justify-between text-zinc-300"><span>X {formatSensorValue(accel.x, 3)}</span><span>Y {formatSensorValue(accel.y, 3)}</span><span>Z {formatSensorValue(accel.z, 3)}</span></div>
+          </div>
+          <div>
+            <span className="mb-1 block font-sans font-bold uppercase tracking-wider text-zinc-600">Gyroscope (°/s)</span>
+            <div className="flex justify-between text-zinc-300"><span>X {formatSensorValue(gyro.x, 2)}</span><span>Y {formatSensorValue(gyro.y, 2)}</span><span>Z {formatSensorValue(gyro.z, 2)}</span></div>
+          </div>
+        </div>
+      </section>
+
+      <div className="text-right text-[8px] font-semibold text-zinc-600">
+        Captured {new Date(event.ts).toLocaleTimeString()}
+      </div>
+    </div>
+  );
+}
+
 export default function OperatorPage() {
-  const { deviceStates, events, loading, error } = useFleetState();
+  const { deviceStates, events, loading, error, removeEvents } = useFleetState();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'fleet' | 'alerts' | 'firmware'>('fleet');
   const [actionLoading, setActionLoading] = useState(false);
@@ -36,6 +193,11 @@ export default function OperatorPage() {
   const [selectedReleaseId, setSelectedReleaseId] = useState<string>("");
   const [otaError, setOtaError] = useState<string | null>(null);
   const [otaRolloutFleetWide, setOtaRolloutFleetWide] = useState(false);
+  const [removingEvents, setRemovingEvents] = useState(false);
+  const [dismissedFeedEventIds, setDismissedFeedEventIds] = useState<Set<string>>(new Set());
+  const [diagnosticPending, setDiagnosticPending] = useState(false);
+  const [diagnosticBaselineId, setDiagnosticBaselineId] = useState<string | null>(null);
+  const [diagnosticError, setDiagnosticError] = useState<string | null>(null);
 
   // Custom inputs for commands
   const [gfRadius, setGfRadius] = useState<number>(300);
@@ -49,12 +211,37 @@ export default function OperatorPage() {
   const [lastSeenS, setLastSeenS] = useState<number | null>(null);
 
   const selectedChair = deviceStates.find((d) => d.wheelchair_id === selectedId);
+  const latestDiagnosticEvent = selectedChair
+    ? events.find((event) =>
+        event.wheelchair_id === selectedChair.wheelchair_id &&
+        event.type === 'DIAGNOSTIC_RESULT'
+      )
+    : undefined;
+  const queuedOtaRequestEvents = events.filter(isQueuedOtaRequest);
+  const selectedQueuedOtaRequestEvents = selectedChair
+    ? queuedOtaRequestEvents.filter((event) => event.wheelchair_id === selectedChair.wheelchair_id)
+    : [];
+  const visibleFeedEvents = events.filter((event) => !dismissedFeedEventIds.has(String(event.id)));
   const handleDeviceRowKeyDown = (event: React.KeyboardEvent<HTMLDivElement>, id: string) => {
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault();
       setSelectedId(id);
     }
   };
+
+  useEffect(() => {
+    try {
+      const storedIds = window.localStorage.getItem(DISMISSED_FEED_EVENTS_KEY);
+      if (!storedIds) return;
+
+      const parsedIds: unknown = JSON.parse(storedIds);
+      if (Array.isArray(parsedIds)) {
+        setDismissedFeedEventIds(new Set(parsedIds.map(String)));
+      }
+    } catch (storageError) {
+      console.warn('Could not restore dismissed feed notifications:', storageError);
+    }
+  }, []);
 
   // Prefill geofence coordinates when a new device is selected
   useEffect(() => {
@@ -117,6 +304,35 @@ export default function OperatorPage() {
     return () => clearInterval(interval);
   }, [lastUpdate]);
 
+  useEffect(() => {
+    setDiagnosticPending(false);
+    setDiagnosticBaselineId(null);
+    setDiagnosticError(null);
+  }, [selectedId]);
+
+  useEffect(() => {
+    if (
+      diagnosticPending &&
+      latestDiagnosticEvent &&
+      String(latestDiagnosticEvent.id) !== diagnosticBaselineId
+    ) {
+      setDiagnosticPending(false);
+      setDiagnosticBaselineId(String(latestDiagnosticEvent.id));
+      setDiagnosticError(null);
+    }
+  }, [diagnosticBaselineId, diagnosticPending, latestDiagnosticEvent]);
+
+  useEffect(() => {
+    if (!diagnosticPending) return;
+
+    const timeout = setTimeout(() => {
+      setDiagnosticPending(false);
+      setDiagnosticError('The ESP32 did not return a diagnostic snapshot within 15 seconds.');
+    }, 15000);
+
+    return () => clearTimeout(timeout);
+  }, [diagnosticPending]);
+
   // Human-readable device uptime (real uptime from telemetry `up`, persisted
   // in device_state.uptime — the old header mislabeled the ts time-of-day).
   const formatUptime = (s: number | null | undefined) => {
@@ -143,7 +359,7 @@ export default function OperatorPage() {
 
   // Send command helper
   const triggerCommand = async (cmd: string, args: any = {}) => {
-    if (!selectedId) return;
+    if (!selectedId) return false;
     setActionLoading(true);
 
     // Write to optimistic state immediately
@@ -169,6 +385,7 @@ export default function OperatorPage() {
         });
 
       if (error) throw error;
+      return true;
     } catch (err: any) {
       alert("Command failure: " + err.message);
       // Clear optimistic state on error
@@ -177,8 +394,23 @@ export default function OperatorPage() {
         delete next[selectedId];
         return next;
       });
+      return false;
     } finally {
       setActionLoading(false);
+    }
+  };
+
+  const runDiagnosticCheck = async () => {
+    if (!selectedChair || !selectedChair.online || diagnosticPending) return;
+
+    setDiagnosticBaselineId(latestDiagnosticEvent ? String(latestDiagnosticEvent.id) : null);
+    setDiagnosticError(null);
+    setDiagnosticPending(true);
+
+    const queued = await triggerCommand('DIAGNOSTIC_RUN');
+    if (!queued) {
+      setDiagnosticPending(false);
+      setDiagnosticError('Could not queue the diagnostic command.');
     }
   };
 
@@ -325,6 +557,20 @@ export default function OperatorPage() {
       ? Array.from(new Set([selectedId, ...deviceStates.map(d => d.wheelchair_id)])).slice(0, 2)
       : [selectedId];
 
+    // The device is the final authority, but reject an obvious no-op before
+    // creating a command. A real OTA feed must begin with a device event, not
+    // with a browser-side assumption that the download has started.
+    const upToDateTargets = targetIds.filter((targetId) =>
+      deviceStates.find((device) => device.wheelchair_id === targetId)?.fw_version === rel.version
+    );
+    if (upToDateTargets.length > 0) {
+      setOtaError(
+        `${upToDateTargets.join(', ')} already runs firmware v${rel.version}. ` +
+        'Upload a higher version before starting an OTA update.'
+      );
+      return;
+    }
+
     if (otaRolloutFleetWide) {
       const confirmPush = confirm(
         `Staged canary rollout: firmware v${rel.version} will be pushed to exactly these chairs:\n\n` +
@@ -368,21 +614,9 @@ export default function OperatorPage() {
           });
 
         if (cmdError) throw cmdError;
-
-        // Trigger local OTA_STARTED event log. supabase-js resolves (does not
-        // throw) on RLS denial, so the error must be checked explicitly (W7).
-        const { error: evError } = await supabase.from('events').insert({
-          wheelchair_id: targetId,
-          type: 'OTA_STARTED',
-          detail: { target_version: rel.version }
-        });
-        if (evError) {
-          console.error('OTA_STARTED audit event insert failed:', evError);
-          setOtaError(`OTA pushed to ${targetId}, but the audit event failed to record: ${evError.message}`);
-        }
       }
 
-      alert(`OTA upgrade command successfully triggered!`);
+      alert('OTA command queued. The live log starts only after the ESP32 acknowledges it.');
     } catch (err: any) {
       console.error("Error pushing OTA:", JSON.stringify(err));
       setOtaError(err?.message || err?.error_description || err?.statusText || JSON.stringify(err) || "Failed to trigger OTA upgrade.");
@@ -427,6 +661,58 @@ export default function OperatorPage() {
     }
   };
 
+  const removeQueuedOtaEvents = async (eventIds: string[]) => {
+    if (eventIds.length === 0 || removingEvents) return;
+
+    const label = eventIds.length === 1 ? 'this queued OTA message' : `${eventIds.length} queued OTA messages`;
+    if (!confirm(`Remove ${label}? Real ESP32 safety and OTA logs are kept.`)) return;
+
+    try {
+      setRemovingEvents(true);
+      const { error: deleteError } = await supabase
+        .from('events')
+        .delete()
+        .in('id', eventIds);
+
+      if (deleteError) throw deleteError;
+      removeEvents(eventIds);
+    } catch (err: any) {
+      console.error('Error removing queued OTA messages:', err);
+      setOtaError(err?.message || 'Could not remove the queued OTA messages.');
+    } finally {
+      setRemovingEvents(false);
+    }
+  };
+
+  const dismissFeedEvents = (eventIds: string[]) => {
+    if (eventIds.length === 0) return;
+
+    setDismissedFeedEventIds((previousIds) => {
+      const nextIds = new Set(previousIds);
+      eventIds.forEach((eventId) => nextIds.add(String(eventId)));
+
+      try {
+        window.localStorage.setItem(
+          DISMISSED_FEED_EVENTS_KEY,
+          JSON.stringify(Array.from(nextIds).slice(-500))
+        );
+      } catch (storageError) {
+        console.warn('Could not persist dismissed feed notifications:', storageError);
+      }
+
+      return nextIds;
+    });
+  };
+
+  const clearFeed = () => {
+    if (visibleFeedEvents.length === 0) return;
+    if (!confirm(`Clear ${visibleFeedEvents.length} feed notifications? Safety audit records will remain in Supabase.`)) {
+      return;
+    }
+
+    dismissFeedEvents(visibleFeedEvents.map((event) => String(event.id)));
+  };
+
   const getEventBadgeClass = (type: string) => {
     if (['FALL', 'OVERTEMP', 'TAMPER', 'OTA_FAIL', 'UNLOCK_FAILED'].includes(type)) {
       return 'bg-red-500/10 text-red-400 border border-red-500/20';
@@ -434,7 +720,56 @@ export default function OperatorPage() {
     if (['TILT_WARN', 'OVERSPEED', 'GEOFENCE_EXIT', 'OTA_DEFERRED', 'SESSION_END_OFFLINE'].includes(type)) {
       return 'bg-amber-500/10 text-amber-400 border border-amber-500/20';
     }
+    if (['OTA_SUCCESS', 'OTA_READY'].includes(type)) {
+      return 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20';
+    }
     return 'bg-blue-500/10 text-blue-400 border border-blue-500/20';
+  };
+
+  const selectedOtaEvents = selectedChair
+    ? events
+        .filter((ev) =>
+          ev.wheelchair_id === selectedChair.wheelchair_id &&
+          ev.type.startsWith('OTA_') &&
+          ev.type !== 'OTA_REQUESTED'
+        )
+        .slice(0, 100)
+    : [];
+
+  const getOtaEventDetail = (ev: { detail: unknown }) => {
+    return ev.detail && typeof ev.detail === 'object' && !Array.isArray(ev.detail)
+      ? ev.detail as Record<string, unknown>
+      : {};
+  };
+
+  const getOtaEventTitle = (ev: { type: string; detail: unknown }) => {
+    const detail = getOtaEventDetail(ev);
+    if (ev.type === 'OTA_STAGE') return String(detail.message || detail.stage || 'OTA stage update');
+    if (ev.type === 'OTA_PROGRESS') return `Downloading firmware ${detail.progress ?? 0}%`;
+    if (ev.type === 'OTA_STARTED') return 'Download initiated';
+    if (ev.type === 'OTA_READY') return 'Installed and rebooting';
+    if (ev.type === 'OTA_SUCCESS') return 'New firmware validated';
+    if (ev.type === 'OTA_DEFERRED') {
+      if (detail.reason === 'already_on_version') return `Skipped: firmware v${detail.target_version || detail.version || 'current'} is already active`;
+      if (detail.reason === 'already_in_progress') return 'Deferred: another OTA is already in progress';
+      return `Deferred: ${detail.reason || 'waiting for safe state'}`;
+    }
+    if (ev.type === 'OTA_ROLLED_BACK') return `Rolled back: ${detail.reason || 'validation failed'}`;
+    if (ev.type === 'OTA_FAIL') return `Failed: ${detail.reason || detail.message || 'OTA error'}`;
+    return ev.type;
+  };
+
+  const getOtaEventClass = (type: string) => {
+    if (type === 'OTA_FAIL' || type === 'OTA_ROLLED_BACK') {
+      return 'border-red-500/30 bg-red-500/10 text-red-300';
+    }
+    if (type === 'OTA_DEFERRED') {
+      return 'border-amber-500/30 bg-amber-500/10 text-amber-300';
+    }
+    if (type === 'OTA_READY' || type === 'OTA_SUCCESS') {
+      return 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300';
+    }
+    return 'border-blue-500/25 bg-blue-500/10 text-blue-300';
   };
 
   return (
@@ -477,8 +812,8 @@ export default function OperatorPage() {
                 activeTab === 'alerts' ? 'bg-zinc-900 text-white' : 'text-zinc-500 hover:text-zinc-300'
               }`}
             >
-              Feed ({events.length})
-              {events.length > 0 && (
+              Feed ({visibleFeedEvents.length})
+              {visibleFeedEvents.length > 0 && (
                 <span className="absolute top-1.5 right-4 w-1.5 h-1.5 rounded-full bg-red-500 animate-ping" />
               )}
             </button>
@@ -884,53 +1219,27 @@ export default function OperatorPage() {
                         </div>
 
                         <button
-                          onClick={() => triggerCommand('DIAGNOSTIC_RUN')}
-                          disabled={actionLoading}
+                          onClick={runDiagnosticCheck}
+                          disabled={actionLoading || diagnosticPending || !selectedChair.online}
                           className="w-full py-2.5 text-[10px] font-bold bg-zinc-850 hover:bg-zinc-800 border border-zinc-800 text-zinc-200 rounded transition-all cursor-pointer uppercase tracking-wider flex items-center justify-center gap-1.5"
                         >
-                          <Activity className="w-3.5 h-3.5 text-blue-500" />
-                          Run Diagnostic Check
+                          {diagnosticPending ? (
+                            <RefreshCw className="w-3.5 h-3.5 animate-spin text-blue-400" />
+                          ) : (
+                            <Activity className="w-3.5 h-3.5 text-blue-500" />
+                          )}
+                          {!selectedChair.online
+                            ? 'Device Offline'
+                            : diagnosticPending
+                              ? 'Reading Live Sensors'
+                              : 'Run Diagnostic Check'}
                         </button>
 
-                        {/* Display latest diagnostic event result */}
-                        {(() => {
-                          const latestDiag = events.find(
-                            (ev) => ev.wheelchair_id === selectedChair.wheelchair_id && ev.type === 'DIAGNOSTIC_RESULT'
-                          );
-                          if (!latestDiag) {
-                            return (
-                              <div className="text-[10px] text-zinc-500 text-center py-1">
-                                No diagnostics run yet. Click button to test.
-                              </div>
-                            );
-                          }
-                          const { imu_status, gps_status, gps_sats, gps_hdop, raw_text } = latestDiag.detail || {};
-                          return (
-                            <div className="space-y-2 border-t border-zinc-900 pt-2.5 mt-2">
-                              <div className="grid grid-cols-2 gap-1.5 text-[9px] uppercase font-semibold">
-                                <div className="p-1.5 rounded bg-zinc-900/60 border border-zinc-900/40 flex flex-col">
-                                  <span className="text-zinc-500">IMU Sensor</span>
-                                  <span className={imu_status === 'OK' ? 'text-emerald-400 font-bold' : 'text-red-400 font-bold'}>
-                                    {imu_status || 'UNKNOWN'}
-                                  </span>
-                                </div>
-                                <div className="p-1.5 rounded bg-zinc-900/60 border border-zinc-900/40 flex flex-col">
-                                  <span className="text-zinc-500">GPS Signal</span>
-                                  <span className={gps_status === 'OK' ? 'text-emerald-400 font-bold' : 'text-red-400 font-bold'}>
-                                    {gps_status || 'UNKNOWN'} ({gps_sats || 0} Sats)
-                                  </span>
-                                </div>
-                              </div>
-                              <div className="p-2 rounded bg-zinc-950/80 border border-zinc-900 text-[10px] font-mono text-zinc-400 break-words leading-relaxed max-h-[80px] overflow-y-auto">
-                                <div className="text-[8px] text-zinc-500 font-bold uppercase tracking-wider mb-0.5">Raw NMEA / Status:</div>
-                                {raw_text || 'No raw string returned.'}
-                              </div>
-                              <div className="text-[8px] text-zinc-600 text-right font-semibold">
-                                Checked: {new Date(latestDiag.ts).toLocaleTimeString()}
-                              </div>
-                            </div>
-                          );
-                        })()}
+                        <DiagnosticResult
+                          event={latestDiagnosticEvent}
+                          pending={diagnosticPending}
+                          error={diagnosticError}
+                        />
                       </div>
                     </div>
                   </div>
@@ -946,12 +1255,29 @@ export default function OperatorPage() {
                 exit={{ opacity: 0, x: 10 }}
                 className="space-y-3"
               >
-                {events.length === 0 ? (
+                <div className="flex min-h-7 items-center justify-between gap-2">
+                  <span className="text-[9px] font-bold uppercase tracking-wider text-zinc-600">
+                    Notifications
+                  </span>
+                  {visibleFeedEvents.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={clearFeed}
+                      title="Clear feed notifications"
+                      className="inline-flex items-center gap-1.5 rounded-md border border-zinc-800 px-2 py-1 text-[9px] font-bold uppercase tracking-wider text-zinc-400 transition-colors hover:border-red-500/40 hover:bg-red-500/10 hover:text-red-300"
+                    >
+                      <Trash2 className="h-3 w-3" />
+                      Clear feed
+                    </button>
+                  )}
+                </div>
+
+                {visibleFeedEvents.length === 0 ? (
                   <div className="text-center p-8 border border-dashed border-zinc-800 rounded-xl text-zinc-500 text-sm">
-                    No safety events recorded.
+                    No feed notifications.
                   </div>
                 ) : (
-                  events.map((ev) => (
+                  visibleFeedEvents.map((ev) => (
                     <div
                       key={ev.id}
                       className="p-3 bg-zinc-900/40 border border-zinc-900 rounded-xl flex gap-3 items-start"
@@ -961,10 +1287,21 @@ export default function OperatorPage() {
                       }`}>
                         <AlertTriangle className="w-4 h-4" />
                       </div>
-                      <div className="space-y-1 flex-1">
-                        <div className="flex justify-between items-center">
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <div className="flex items-center justify-between gap-2">
                           <span className="font-bold text-xs text-zinc-200">{ev.wheelchair_id}</span>
-                          <span className="text-[10px] text-zinc-500">{new Date(ev.ts).toLocaleTimeString()}</span>
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-[10px] text-zinc-500">{new Date(ev.ts).toLocaleTimeString()}</span>
+                            <button
+                              type="button"
+                              onClick={() => dismissFeedEvents([String(ev.id)])}
+                              title="Remove notification"
+                              aria-label={`Remove ${ev.type} notification for ${ev.wheelchair_id}`}
+                              className="rounded p-1 text-zinc-600 transition-colors hover:bg-red-500/10 hover:text-red-300"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
                         </div>
                         <div className="flex flex-wrap gap-2 items-center">
                           <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${getEventBadgeClass(ev.type)}`}>
@@ -982,7 +1319,10 @@ export default function OperatorPage() {
                               SOS: 'Manual Emergency SOS',
                               SESSION_END_OFFLINE: 'Session Expired While Device OFFLINE — Verify Chair!',
                               UNLOCK_FAILED: 'Paid Rental: Device REFUSED Unlock',
+                              OTA_REQUESTED: 'OTA Command Queued - Awaiting ESP32',
                               OTA_STARTED: 'OTA Firmware Download Initiated',
+                              OTA_STAGE: 'OTA Live Stage Update',
+                              OTA_PROGRESS: 'OTA Download Progress',
                               OTA_READY: 'OTA Write Completed, Rebooting',
                               OTA_SUCCESS: 'Firmware Upgraded & Validated',
                               OTA_FAIL: 'Firmware Flash/Download Failed',
@@ -1129,9 +1469,12 @@ export default function OperatorPage() {
                     <div className="flex items-center justify-between border-b border-zinc-900 pb-1.5">
                       <span className="font-extrabold uppercase text-[10px] text-zinc-400 tracking-wider">Live OTA Status: {selectedChair.wheelchair_id}</span>
                       <span className={`px-1.5 py-0.5 rounded text-[9px] font-extrabold tracking-wider uppercase ${
+                        selectedChair.ota_status === 'preparing' ? 'bg-cyan-500/10 text-cyan-400 animate-pulse' :
                         selectedChair.ota_status === 'downloading' ? 'bg-blue-500/10 text-blue-400 animate-pulse' :
+                        selectedChair.ota_status === 'installing' ? 'bg-violet-500/10 text-violet-400 animate-pulse' :
                         selectedChair.ota_status === 'deferred' ? 'bg-amber-500/10 text-amber-400' :
                         selectedChair.ota_status === 'failed' ? 'bg-red-500/10 text-red-400' :
+                        selectedChair.ota_status === 'success' ? 'bg-emerald-500/10 text-emerald-400' :
                         selectedChair.ota_status === 'rebooting' ? 'bg-indigo-500/10 text-indigo-400 animate-pulse' :
                         'bg-zinc-800 text-zinc-400'
                       }`}>
@@ -1153,15 +1496,26 @@ export default function OperatorPage() {
                     </div>
 
                     {/* Progress Bar */}
-                    {selectedChair.ota_status === 'downloading' && (
+                    {['preparing', 'downloading', 'installing', 'rebooting', 'success'].includes(selectedChair.ota_status || '') && (
                       <div className="space-y-1">
                         <div className="flex justify-between text-[9px] text-zinc-400 font-bold">
-                          <span>Downloading stream to partition...</span>
+                          <span>
+                            {selectedChair.ota_status === 'preparing' ? 'Closing system and preparing OTA...' :
+                             selectedChair.ota_status === 'installing' ? 'Installing firmware image...' :
+                             selectedChair.ota_status === 'rebooting' ? 'Installed. Rebooting ESP32-S3...' :
+                             selectedChair.ota_status === 'success' ? 'Firmware validated successfully.' :
+                             'Downloading stream to OTA partition...'}
+                          </span>
                           <span>{selectedChair.ota_progress || 0}%</span>
                         </div>
                         <div className="w-full bg-zinc-900 h-2 rounded-full overflow-hidden border border-zinc-800/80">
                           <div
-                            className="bg-blue-500 h-full transition-all duration-300"
+                            className={`h-full transition-all duration-300 ${
+                              selectedChair.ota_status === 'success' ? 'bg-emerald-500' :
+                              selectedChair.ota_status === 'installing' ? 'bg-violet-500' :
+                              selectedChair.ota_status === 'rebooting' ? 'bg-indigo-500' :
+                              'bg-blue-500'
+                            }`}
                             style={{ width: `${selectedChair.ota_progress || 0}%` }}
                           />
                         </div>
@@ -1177,6 +1531,70 @@ export default function OperatorPage() {
                         </div>
                       </div>
                     )}
+
+                    <div className="border-t border-zinc-900 pt-2.5 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="font-extrabold uppercase text-[9px] text-zinc-500 tracking-wider">Real ESP32 OTA Logs</span>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[9px] font-bold text-zinc-600">{selectedOtaEvents.length} event{selectedOtaEvents.length === 1 ? '' : 's'}</span>
+                          {selectedQueuedOtaRequestEvents.length > 0 && (
+                            <button
+                              type="button"
+                              onClick={() => removeQueuedOtaEvents(selectedQueuedOtaRequestEvents.map((event) => String(event.id)))}
+                              disabled={removingEvents}
+                              title="Remove old queued OTA messages"
+                              aria-label="Remove old queued OTA messages"
+                              className="rounded p-1 text-zinc-500 transition-colors hover:bg-red-500/10 hover:text-red-300 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {selectedOtaEvents.length === 0 ? (
+                        <div className="border border-dashed border-zinc-800 rounded-lg p-3 text-[9px] text-zinc-500 font-semibold">
+                          No OTA logs from this ESP32 yet. Push OTA and wait for the device to acknowledge.
+                        </div>
+                      ) : (
+                        <div className="space-y-1.5 max-h-[280px] overflow-y-auto pr-1">
+                          {selectedOtaEvents.map((ev) => {
+                            const detail = getOtaEventDetail(ev);
+                            const progress = typeof detail.progress === 'number' ? detail.progress : null;
+                            return (
+                              <div
+                                key={`${ev.id}-${ev.ts}`}
+                                className={`rounded-lg border p-2.5 text-[9px] font-mono ${getOtaEventClass(ev.type)}`}
+                              >
+                                <div className="flex items-start justify-between gap-2">
+                                  <div className="min-w-0">
+                                    <div className="font-extrabold uppercase tracking-wider text-[8px] opacity-80">{ev.type}</div>
+                                    <div className="mt-0.5 text-[10px] font-bold break-words">{getOtaEventTitle(ev)}</div>
+                                  </div>
+                                  <span className="shrink-0 text-[8px] opacity-70">{new Date(ev.ts).toLocaleTimeString()}</span>
+                                </div>
+                                {progress !== null && (
+                                  <div className="mt-2 h-1.5 rounded-full bg-black/30 overflow-hidden">
+                                    <div
+                                      className="h-full bg-current transition-all duration-300"
+                                      style={{ width: `${Math.max(0, Math.min(100, progress))}%` }}
+                                    />
+                                  </div>
+                                )}
+                                {Boolean(detail.reason || detail.code || detail.stage || detail.version) && (
+                                  <div className="mt-1.5 text-[8px] opacity-75 break-words">
+                                    {detail.stage ? `stage=${detail.stage} ` : ''}
+                                    {detail.reason ? `reason=${detail.reason} ` : ''}
+                                    {detail.code ? `code=${detail.code} ` : ''}
+                                    {detail.version ? `version=${detail.version}` : ''}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 )}
 
@@ -1222,7 +1640,7 @@ export default function OperatorPage() {
               </p>
             </div>
             <div className="bg-zinc-900 p-3 rounded-lg border border-zinc-800 text-xs font-mono text-zinc-300 space-y-1.5 text-left">
-              <div className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider mb-0.5 text-center">Broadcasting Live Location</div>
+              <div className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider mb-0.5 text-center">Live Location</div>
               <div>Coordinates: {(selectedChair.lat ?? 0).toFixed(6)}, {(selectedChair.lng ?? 0).toFixed(6)}</div>
               <div className="pt-1 text-center">
                 <a 
@@ -1237,7 +1655,7 @@ export default function OperatorPage() {
               </div>
             </div>
             <p className="text-[10px] text-zinc-500 leading-normal">
-              📡 Sending live coordinates to nearest emergency rescue dispatchers (Trauma & EMS services).
+              Live coordinates are available to the emergency response workflow.
             </p>
             <button
               onClick={() => triggerCommand('CLEAR_SOS')}
