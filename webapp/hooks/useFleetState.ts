@@ -56,6 +56,8 @@ export interface DeviceState {
     in: number;
     dist: number;
     r: number;
+    lat?: number;
+    lng?: number;
   } | null;
   last_seen_local?: number;
 }

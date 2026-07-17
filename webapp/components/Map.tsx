@@ -41,6 +41,20 @@ function calculateBearing(lat1: number, lng1: number, lat2: number, lng2: number
   return (brng + 360) % 360;
 }
 
+function getGeofenceCenter(
+  geofence: DeviceState['geofence'],
+  fallbackLat: number,
+  fallbackLng: number
+): L.LatLngTuple {
+  const lat = geofence?.lat;
+  const lng = geofence?.lng;
+
+  return [
+    typeof lat === 'number' && Number.isFinite(lat) ? lat : fallbackLat,
+    typeof lng === 'number' && Number.isFinite(lng) ? lng : fallbackLng,
+  ];
+}
+
 export default function Map({ deviceStates, selectedId, onSelectDevice }: MapProps) {
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
@@ -107,7 +121,7 @@ export default function Map({ deviceStates, selectedId, onSelectDevice }: MapPro
       currentDevices.add(wheelchair_id);
 
       // Determine state colors
-      const isBreached = geofence ? geofence.in === 0 : false;
+      const isBreached = geofence?.on === 1 && geofence.in === 0;
       const isTampered = !!device.tamper;
       const themeColor = !online
         ? '#9ca3af' // gray
@@ -168,9 +182,7 @@ export default function Map({ deviceStates, selectedId, onSelectDevice }: MapPro
         const gfRadius = geofence?.r || 300;
 
         if (geofence && geofence.on === 1) {
-          const gfCenterLat = (geofence as any)?.lat !== undefined ? (geofence as any).lat : lat;
-          const gfCenterLng = (geofence as any)?.lng !== undefined ? (geofence as any).lng : lng;
-          geofenceCircle = L.circle([gfCenterLat, gfCenterLng], {
+          geofenceCircle = L.circle(getGeofenceCenter(geofence, lat, lng), {
             radius: gfRadius,
             color: isBreached ? '#ef4444' : '#3b82f6',
             fillColor: isBreached ? '#ef4444' : '#3b82f6',
@@ -215,20 +227,19 @@ export default function Map({ deviceStates, selectedId, onSelectDevice }: MapPro
 
         // Update geofence overlay properties
         const gfRadius = geofence?.r || 300;
-        if (existing.circle) {
+        if (existing.circle && geofence?.on !== 1) {
+          existing.circle.remove();
+          existing.circle = null;
+        } else if (existing.circle) {
           existing.circle.setStyle({
             color: isBreached ? '#ef4444' : '#3b82f6',
             fillColor: isBreached ? '#ef4444' : '#3b82f6',
             fillOpacity: isBreached ? 0.12 : 0.04,
           });
-          const gfCenterLat = (geofence as any)?.lat !== undefined ? (geofence as any).lat : lat;
-          const gfCenterLng = (geofence as any)?.lng !== undefined ? (geofence as any).lng : lng;
-          existing.circle.setLatLng([gfCenterLat, gfCenterLng]);
+          existing.circle.setLatLng(getGeofenceCenter(geofence, lat, lng));
           existing.circle.setRadius(gfRadius);
         } else if (geofence && geofence.on === 1) {
-          const gfCenterLat = (geofence as any)?.lat !== undefined ? (geofence as any).lat : lat;
-          const gfCenterLng = (geofence as any)?.lng !== undefined ? (geofence as any).lng : lng;
-          existing.circle = L.circle([gfCenterLat, gfCenterLng], {
+          existing.circle = L.circle(getGeofenceCenter(geofence, lat, lng), {
             radius: gfRadius,
             color: isBreached ? '#ef4444' : '#3b82f6',
             fillColor: isBreached ? '#ef4444' : '#3b82f6',
@@ -304,14 +315,19 @@ export default function Map({ deviceStates, selectedId, onSelectDevice }: MapPro
 
   }, [deviceStates, onSelectDevice]);
 
-  // Center on selected wheelchair dynamically as its coordinates update
+  // With no physical fix, focus the requested geofence rather than an
+  // untrusted continuity marker that may still be converging to its anchor.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !selectedId) return;
 
     const device = deviceStates.find(d => d.wheelchair_id === selectedId);
     if (device && !isNaN(device.lat) && !isNaN(device.lng)) {
-      map.setView([device.lat, device.lng], map.getZoom() || 16, {
+      const center = device.gps_fix === false && device.geofence?.on === 1
+        ? getGeofenceCenter(device.geofence, device.lat, device.lng)
+        : [device.lat, device.lng] as L.LatLngTuple;
+
+      map.setView(center, map.getZoom() || 16, {
         animate: true,
         duration: 0.5
       });

@@ -747,6 +747,18 @@ void processCommands(const String &jsonResponse) {
             } else {
                 sharedTelemetry.gf.dist_m = 0.0f;
                 sharedTelemetry.gf.inside = true;
+                // Keep the non-authoritative display position beside the newly
+                // requested fence while the physical receiver has no fix.
+                sharedTelemetry.gps_fallback_anchor_lat = lc.lat;
+                sharedTelemetry.gps_fallback_anchor_lng = lc.lng;
+                sharedTelemetry.gps_fallback_anchor_revision++;
+                if (sharedTelemetry.gps_fallback_anchor_revision == 0) {
+                    sharedTelemetry.gps_fallback_anchor_revision = 1;
+                }
+                sharedTelemetry.gps_lat = lc.lat;
+                sharedTelemetry.gps_lng = lc.lng;
+                sharedTelemetry.gps_speed_kmh = 0.3f;
+                sharedTelemetry.gps_simulated = true;
             }
             ok = true;
         } else if (cmd == "OTA") {
