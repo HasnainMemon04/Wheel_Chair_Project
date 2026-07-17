@@ -1,0 +1,31 @@
+# Wheelchair PCB Project Context
+
+## 2025-01-01 -- Initial schematic: ESP32-WROOM-32 + ICM-42688-P IMU via SPI
+
+### Components placed
+- **U1**: ESP32-WROOM-32 module (RF_Module:ESP32-WROOM-32)
+- **U2**: ICM-42688-P 6-axis IMU (Package_LGA:LGA-14_3x3mm_P0.5mm)
+- **C1**: 100nF decoupling cap on ESP32 3V3 rail (0402)
+- **C2**: 100nF decoupling cap on IMU VDD/VDDIO rails (0402)
+- **R1**: 1kΩ pull-up resistor on IMU INT1 line to 3V3 (0402)
+
+### Interface: SPI (VSPI bus on ESP32)
+| ESP32 GPIO | ESP32 Pin | Signal  | ICM-42688-P Pin |
+|-----------|-----------|---------|-----------------|
+| GPIO18    | 30        | SPI_SCK  | Pin 13 (SCLK)   |
+| GPIO19    | 31        | SPI_MISO | Pin 1  (SDO)    |
+| GPIO23    | 37        | SPI_MOSI | Pin 14 (SDI)    |
+| GPIO5     | 29        | IMU_CS   | Pin 12 (CS)     |
+| GPIO4     | 26        | IMU_INT  | Pin 4  (INT1)   |
+
+### Design decisions
+- Chose SPI over I2C for faster data rates (up to 24 MHz) — suitable for wheelchair motion sensing
+- ICM-42688-P RESV pins 2, 3, 10, 11 are no-connect; RESV pin 7 tied to GND per datasheet
+- ICM-42688-P FSYNC/INT2 pin 9 tied to GND (not used)
+- R1 pull-up on INT1 ensures defined high state when IMU is not asserting interrupt
+- PWR_FLAG symbols on +3V3 and GND rails to satisfy ERC
+
+### Next steps
+- Add USB-UART bridge (CH340 or CP2102) for programming if needed
+- Add 3.3V LDO regulator if board is not powered from an existing 3.3V rail
+- Transfer to PCB layout via Update PCB from Schematic

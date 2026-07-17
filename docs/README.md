@@ -18,16 +18,15 @@ paid again. Operators manage the fleet and push firmware updates remotely.
 | # | Feature | One-line behavior |
 |---|---------|-------------------|
 | 1 | Remote Power ON/OFF | Operator/app toggles main power via a relay |
-| 2 | Temperature Monitoring | Motor + battery temp (DS18B20 ×2), ambient (DHT22); over-temp → alarm + cutoff |
+| 2 | Temperature Monitoring | Battery temp (DS18B20), over-temp → alarm + cutoff |
 | 4 | GPS Tracking & Geofencing | Live location; alert + action on leaving the rental zone |
-| 5 | Speed Monitoring & Limiting | GPS-derived speed; over-limit → warn + cutoff (see hardware gap) |
 | 7 | Internet Connectivity | WiFi ↔ Supabase cloud over HTTPS |
-| 9 | Gyroscope & Tilt Detection | MPU6050 detects dangerous tilt / fall → safe stop + alert |
-| 10 | Tamper Detection | Vibration + motion + occupancy while locked → alarm + notify |
+| 9 | Gyroscope & Tilt Detection | MPU6500 detects dangerous tilt / fall → safe stop + alert |
+| 10 | Tamper Detection | Vibration + motion while locked → alarm + notify |
 | 12 | OTA Updates | Remote, versioned, signed firmware updates |
 | 13 | Rental Session Control | Pay-to-unlock, timed session, warn-before-expiry, lock on expiry |
 
-> Features 3 (full BMS), 6 (camera), 8 (IP67), 11 (downhill control) are **out of scope** this phase.
+> Features 3 (full BMS), 5 (speed limiting), 6 (camera), 8 (IP67), 11 (downhill control) are **out of scope** this phase.
 
 ---
 

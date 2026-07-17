@@ -1,0 +1,4 @@
+line 10,10 -> 80,10 layer "Edge.Cuts" width 0.05 stroke default uid 066063fe-bbf0-4c68-a27a-3be48d7c98c7
+line 10,65 -> 10,10 layer "Edge.Cuts" width 0.05 stroke default uid 2ab4ea03-f286-4c79-b92a-29177fe62085
+line 80,10 -> 80,65 layer "Edge.Cuts" width 0.05 stroke default uid a35a2caf-9eb7-437b-b677-5fe1c59821d6
+line 80,65 -> 10,65 layer "Edge.Cuts" width 0.05 stroke default uid 3f2adbe4-b7b6-459e-80ed-ca4497dc5e1d

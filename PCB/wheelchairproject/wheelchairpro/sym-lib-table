@@ -1,0 +1,4 @@
+(sym_lib_table
+  (lib (name "wheelchairpro")(type "KiCad")(uri "${KIPRJMOD}/wheelchairpro.kicad_sym")(options "")(descr "Project-local custom symbols"))
+  (lib (name "wheelchairpro_abs")(type "KiCad")(uri "D:/Wheel_Chair_Project/PCB/wheelchairproject/wheelchairpro/wheelchairpro.kicad_sym")(options "")(descr "Project-local custom symbols (absolute path fallback)"))
+)

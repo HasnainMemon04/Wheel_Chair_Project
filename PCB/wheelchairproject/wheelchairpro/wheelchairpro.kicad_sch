@@ -1,0 +1,168 @@
+(kicad_sch
+	(version 20260306)
+	(generator "eeschema")
+	(generator_version "10.0")
+	(uuid "76e39e4d-e544-4516-8ada-6f2987319d1a")
+	(paper "A4")
+	(title_block
+		(title "Wheelchair IoT Telematics Module")
+		(date "2025-07-14")
+		(rev "E")
+		(company "Root Sheet - Hierarchical Design")
+	)
+	(lib_symbols)
+	(text "Hierarchical design - one sheet per block."
+		(exclude_from_sim no)
+		(at 30 130 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+		(uuid "9441a925-e44c-4a18-9d27-64166f92b055")
+	)
+	(sheet
+		(at 100 40)
+		(size 60 40)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(stroke
+			(width 0.1524)
+			(type solid)
+		)
+		(fill
+			(color 0 0 0 0)
+		)
+		(uuid "22d60448-0d29-4d96-8b5d-ceec838b0303")
+		(property "Sheetname" "Power Rails"
+			(at 110 39.2884 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left bottom)
+			)
+		)
+		(property "Sheetfile" "power_rails.kicad_sch"
+			(at 110 60 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left top)
+			)
+		)
+		(instances
+			(project "wheelchairpro"
+				(path "/76e39e4d-e544-4516-8ada-6f2987319d1a"
+					(page "3")
+				)
+			)
+		)
+	)
+	(sheet
+		(at 30 40)
+		(size 60 40)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(stroke
+			(width 0.1524)
+			(type solid)
+		)
+		(fill
+			(color 0 0 0 0)
+		)
+		(uuid "237c2180-4b06-4867-a3ec-e31dd83c5b27")
+		(property "Sheetname" "Power Input"
+			(at 30 39.2884 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left bottom)
+			)
+		)
+		(property "Sheetfile" "power_input.kicad_sch"
+			(at 30 60 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left top)
+			)
+		)
+		(instances
+			(project "wheelchairpro"
+				(path "/76e39e4d-e544-4516-8ada-6f2987319d1a"
+					(page "2")
+				)
+			)
+		)
+	)
+	(sheet
+		(at 170 40)
+		(size 60 40)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(stroke
+			(width 0.1524)
+			(type solid)
+		)
+		(fill
+			(color 0 0 0 0)
+		)
+		(uuid "3c91cf66-7656-4829-999f-47f803a13d6b")
+		(property "Sheetname" "MCU"
+			(at 170 39.2884 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left bottom)
+			)
+		)
+		(property "Sheetfile" "mcu.kicad_sch"
+			(at 170 60 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left top)
+			)
+		)
+		(instances
+			(project "wheelchairpro"
+				(path "/76e39e4d-e544-4516-8ada-6f2987319d1a"
+					(page "4")
+				)
+			)
+		)
+	)
+	(sheet_instances
+		(path "/"
+			(page "1")
+		)
+	)
+	(embedded_fonts no)
+)

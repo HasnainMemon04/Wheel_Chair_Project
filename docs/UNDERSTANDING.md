@@ -12,7 +12,7 @@ The architecture is divided into three tiers:
 
 ### Tier 1: The Device (Firmware)
 *   **Hardware Platform:** ESP32-WROOM-32 (30-pin dev board) running PlatformIO with the Arduino core.
-*   **Operating Model:** Multi-threaded FreeRTOS tasks coordinating sensor reads (GPS, IMU, temperature, occupancy, vibration) and actuation (relays, buzzer, status LED).
+*   **Operating Model:** Multi-threaded FreeRTOS tasks coordinating sensor reads (GPS, IMU, temperature, motion state, vibration) and actuation (relays, buzzer, status LED).
 *   **Connectivity:** WiFi only (HTTPS to Supabase Edge Functions).
 *   **Auth/Security:** Performs HMAC-SHA256 signing of telemetry and event uploads using a per-device key. Verifies HMAC-SHA256 signatures of commands polled from the cloud.
 

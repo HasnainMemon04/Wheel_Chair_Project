@@ -1,0 +1,155 @@
+file_uid df93d1e2-0f31-4f87-9e0c-3be2e163f2ce
+paper "A4"
+title_block title "Wheelchair IoT - MCU Block 3" date "2025-07-14" rev "A" company "Block 3: ESP32-WROOM-32E-H4"
+
+# ── Nets ─────────────────────────────────────────────────────────────────────
+net V3V3 GND ESP_EN
+net BOOT_BTN IO0_NET IO2_NET IO12_NET IO15_NET
+net MODEM_TXD MODEM_RXD
+net GPS_TXD GPS_RXD
+net I2C_SDA I2C_SCL
+net USB_TXD USB_RXD
+net ONEWIRE HALL_INT ADC_BATT
+
+# ── U4 ESP32-WROOM-32E-H4 ────────────────────────────────────────────────────
+comp U4 RF_Module:ESP32-WROOM-32E "ESP32-WROOM-32E-H4" @ 124,100 rot 0
+  props {
+    prop "footprint":"RF_Module:ESP32-WROOM-32E"
+    prop "MPN":"ESP32-WROOM-32E-H4"
+    prop "Manufacturer":"Espressif"
+    prop "LCSC":"C3013935"
+  }
+  pins (
+    1=GND,
+    2=V3V3,
+    3=ESP_EN,
+    4=ADC_BATT,
+    5=DNC,
+    6=DNC,
+    7=DNC,
+    8=ONEWIRE,
+    9=HALL_INT,
+    10=DNC,
+    11=DNC,
+    12=DNC,
+    13=DNC,
+    14=IO12_NET,
+    15=GND,
+    16=DNC,
+    17=DNC,
+    18=DNC,
+    19=DNC,
+    20=DNC,
+    21=DNC,
+    22=DNC,
+    23=IO15_NET,
+    24=IO2_NET,
+    25=IO0_NET,
+    26=DNC,
+    27=MODEM_RXD,
+    28=MODEM_TXD,
+    29=DNC,
+    30=DNC,
+    31=DNC,
+    32=DNC,
+    33=I2C_SDA,
+    34=USB_RXD,
+    35=USB_TXD,
+    36=I2C_SCL,
+    37=GPS_RXD,
+    38=GND,
+    39=GND
+  )
+  uid 7418093c-4514-4c0e-baa4-76fa145a0570
+
+# ── EN Reset Circuit ─────────────────────────────────────────────────────────
+# R14: 10k pull-up V3V3 -> ESP_EN
+comp R14 Device:R "10k" @ 175,58 rot 0
+  props {
+    prop "footprint":"Resistor_SMD:R_0603_1608Metric"
+    prop "MPN":"RC0603FR-0710KL"
+    prop "Manufacturer":"Yageo"
+  }
+  pins (1=V3V3, 2=ESP_EN)
+  uid b375dd73-bc43-405b-82c0-e62b717442ea
+
+# C19: 1uF bypass EN -> GND (slow power-on reset)
+comp C19 Device:C "1uF" @ 191,70 rot 0
+  props {
+    prop "footprint":"Capacitor_SMD:C_0603_1608Metric"
+    prop "MPN":"GRM188R61A105KA61D"
+    prop "Manufacturer":"Murata"
+  }
+  pins (1=ESP_EN, 2=GND)
+  uid 94a2597b-fae4-49a2-921e-8d50c4b6b032
+
+# SW1: Reset button EN -> GND
+comp SW1 Switch:SW_Push "RESET" @ 175,78 rot 0
+  props {
+    prop "footprint":"Button_Switch_SMD:SW_SPST_CK_RS282G05A3"
+    prop "MPN":"RS-282G05A3-SM RT"
+    prop "Manufacturer":"C&K"
+  }
+  pins (1=ESP_EN, 2=GND)
+  uid 8bfad9ea-5101-4772-9870-b60d06a5281a
+
+# ── Boot Button + Strapping ───────────────────────────────────────────────────
+# SW2: Boot button IO0 -> GND (hold LOW at power-on = download mode)
+comp SW2 Switch:SW_Push "BOOT" @ 60,95 rot 0
+  props {
+    prop "footprint":"Button_Switch_SMD:SW_SPST_CK_RS282G05A3"
+    prop "MPN":"RS-282G05A3-SM RT"
+    prop "Manufacturer":"C&K"
+  }
+  pins (1=IO0_NET, 2=GND)
+  uid 73c8d8ce-b61e-465c-a1ab-061fd2d1ef9f
+
+# R15: 10k pull-up IO0 -> V3V3 (HIGH=normal boot)
+comp R15 Device:R "10k" @ 60,80 rot 0
+  props {
+    prop "footprint":"Resistor_SMD:R_0603_1608Metric"
+    prop "MPN":"RC0603FR-0710KL"
+    prop "Manufacturer":"Yageo"
+  }
+  pins (1=V3V3, 2=IO0_NET)
+  uid 7e560405-5cc2-4071-8711-7c7fca898c2f
+
+# R16: 10k pull-down IO2 -> GND (LOW=normal boot, no ext flash SDIO)
+comp R16 Device:R "10k" @ 60,112 rot 0
+  props {
+    prop "footprint":"Resistor_SMD:R_0603_1608Metric"
+    prop "MPN":"RC0603FR-0710KL"
+    prop "Manufacturer":"Yageo"
+  }
+  pins (1=IO2_NET, 2=GND)
+  uid dcb0691a-6ff5-4451-ac69-7346798477c0
+
+# R17: 10k pull-down IO12 -> GND (LOW = 3.3V VDD_SDIO, correct for no ext SDIO)
+comp R17 Device:R "10k" @ 60,125 rot 0
+  props {
+    prop "footprint":"Resistor_SMD:R_0603_1608Metric"
+    prop "MPN":"RC0603FR-0710KL"
+    prop "Manufacturer":"Yageo"
+  }
+  pins (1=IO12_NET, 2=GND)
+  uid 1faa9b3b-f515-4233-9a52-f49a2dcc0b97
+
+# R18: 10k pull-up IO15 -> V3V3 (HIGH = MTDO enables UART0 debug output)
+comp R18 Device:R "10k" @ 60,138 rot 0
+  props {
+    prop "footprint":"Resistor_SMD:R_0603_1608Metric"
+    prop "MPN":"RC0603FR-0710KL"
+    prop "Manufacturer":"Yageo"
+  }
+  pins (1=V3V3, 2=IO15_NET)
+  uid b7e7d442-c115-4d37-917e-ef555d421a6a
+
+# C20: 100nF decoupling on VDD pin
+comp C20 Device:C "100nF" @ 160,58 rot 0
+  props {
+    prop "footprint":"Capacitor_SMD:C_0603_1608Metric"
+    prop "MPN":"GRM188R71C104KA01D"
+    prop "Manufacturer":"Murata"
+  }
+  pins (1=V3V3, 2=GND)
+  uid 8248f317-3f60-4d9d-9680-5c930aa4922e

@@ -1,45 +1,15 @@
 /*
   =====================================================================
-  GY-521 (MPU6050) Motion Dashboard — Async WebSocket Edition
+  MPU6500 6-Axis Diagnostic Lab — WebSocket Edition
   =====================================================================
-  Real-time 3D wheelchair visualization, driven by a live WebSocket
-  stream instead of HTTP polling. This eliminates the periodic
-  stutter/freeze you'd get from a synchronous WebServer + fetch()
-  polling + String-concatenated JSON (heap fragmentation).
+  Real-time 3D wheelchair visualization and sensor diagnostic dashboard.
+  Configures the MPU6500 with a 41Hz Digital Low Pass Filter (DLPF) to
+  smooth out motor vibrations and mechanical noise.
 
-  NEW in this version:
-    - WebSocket streaming (~50Hz push, no polling, no blocking)
-    - Calibrate button: hold the chair level & still, tap it, and
-      the firmware zeroes out gyro drift + resets current tilt as
-      the new "level" reference (0° pitch/roll/yaw)
-    - JSON built into a fixed char buffer (no String concatenation)
-      to avoid heap fragmentation over long runtimes
-
-  REQUIRED LIBRARIES (Library Manager -> search these exact names):
-    - "ESPAsyncWebServer" (by ESP32Async)
-    - "AsyncTCP"          (by ESP32Async)
-
-  Wiring (unchanged):
-    GY-521 VCC -> 3.3V     GY-521 GND -> GND
-    GY-521 SCL -> GPIO 22  GY-521 SDA -> GPIO 21
-    Buzzer +   -> GPIO 13  Buzzer -   -> GND
-
-  WiFi:
-    Connect to "ESP32-Wheelchair" (password below), open
-    http://192.168.4.1
-
-  Sensor fusion:
-    Pitch & Roll = complementary filter (98% gyro, 2% accel) ->
-    smooth AND drift-free. Yaw = pure gyro integration -> will
-    still slowly drift over long sessions since there's no
-    magnetometer on this board (hardware limitation).
-
-  Tilt alarm:
-    |pitch| or |roll| > TILT_THRESHOLD_DEG -> buzzer fast-beeps.
-
-  IMPORTANT — buzzer type:
-    Assumes active buzzer, HIGH = ON. Flip BUZZER_ACTIVE_LOW if
-    yours is active-LOW.
+  WIRING:
+    MPU6500 VCC  -> 3.3V     GND -> GND
+    MPU6500 SDA  -> GPIO 5   SCL -> GPIO 6
+    Buzzer (+)   -> GPIO 13  Buzzer (-) -> GND
   =====================================================================
 */
 
@@ -49,73 +19,75 @@
 #include <ESPAsyncWebServer.h>
 
 // ---------------- Pin configuration ----------------
-#define SDA_PIN   21
-#define SCL_PIN   22
+#define SDA_PIN               5
+#define SCL_PIN               6
 #define BUZZER_PIN            13
 #define BUZZER_ACTIVE_LOW     false
 
-// ---------------- MPU6050 registers ----------------
-#define MPU_ADDR         0x68
-#define REG_PWR_MGMT_1    0x6B
-#define REG_ACCEL_XOUT_H  0x3B
-
-// ---------------- Scale factors (±2g, ±250°/s default ranges) ----------------
-#define ACCEL_SCALE   16384.0
-#define GYRO_SCALE    131.0
-
-// ---------------- Filter / alarm tuning ----------------
-#define COMPLEMENTARY_ALPHA   0.98
+// ---------------- Scale / Threshold configuration ----------------
 #define TILT_THRESHOLD_DEG    30.0
 #define BEEP_FAST_MS           150
-
-// ---------------- Timing ----------------
-#define SENSOR_INTERVAL_MS    20   // ~50Hz sensor fusion + broadcast rate
-
-// ---------------- Calibration ----------------
-#define CAL_SAMPLES           100  // ~1 second of samples at 50Hz
+#define SENSOR_INTERVAL_MS    50   // ~20Hz stream rate
 
 // ---------------- WiFi Access Point credentials ----------------
-const char* AP_SSID     = "ESP32-Wheelchair";
-const char* AP_PASSWORD = "wheelchair1";
+const char* AP_SSID     = "ESP32-S3-Wheelchair-Test";
+const char* AP_PASSWORD = "wheelchair123";
 
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
 
 // ---------------- Shared live state ----------------
-float g_ax, g_ay, g_az;
-float g_gx, g_gy, g_gz;
-float g_pitch = 0, g_roll = 0, g_yaw = 0;
-bool  g_alarmActive = false;
 bool  g_mpuOk = false;
-
-// Calibration offsets, applied to every subsequent reading
-float gyroBiasX = 0, gyroBiasY = 0, gyroBiasZ = 0;
-float pitchOffset = 0, rollOffset = 0;
-
-enum CalState { CAL_IDLE, CAL_RUNNING };
-CalState g_calState = CAL_IDLE;
-int   calCount = 0;
-float calSumGX = 0, calSumGY = 0, calSumGZ = 0;
-float calSumPitch = 0, calSumRoll = 0;
-
+bool  g_alarmActive = false;
 unsigned long lastSensorRead = 0;
-unsigned long lastFusionMicros = 0;
 unsigned long lastBuzzerToggle = 0;
 unsigned long lastWsCleanup = 0;
 bool buzzerOn = false;
 
-// ---------------- Buzzer ----------------
+enum CalMode { CAL_NONE, CAL_ACCEL_GYRO };
+volatile CalMode g_calMode = CAL_NONE;
+
+// ---------------- 6-Axis state variables ----------------
+float g_ax = 0, g_ay = 0, g_az = 0;
+float g_gx = 0, g_gy = 0, g_gz = 0;
+float g_pitch = 0, g_roll = 0, g_yaw = 0;
+
+// Calibration offsets
+float gyroBiasX = 0, gyroBiasY = 0, gyroBiasZ = 0;
+float pitchOffset = 0, rollOffset = 0;
+float calSumGX = 0, calSumGY = 0, calSumGZ = 0;
+float calSumPitch = 0, calSumRoll = 0;
+int   calCount = 0;
+unsigned long lastFusionMicros = 0;
+
+// ---------------- Buzzer Control ----------------
 void buzzerWrite(bool on) {
-  if (BUZZER_ACTIVE_LOW) digitalWrite(BUZZER_PIN, on ? LOW : HIGH);
-  else                    digitalWrite(BUZZER_PIN, on ? HIGH : LOW);
+  if (BUZZER_ACTIVE_LOW) {
+    digitalWrite(BUZZER_PIN, on ? LOW : HIGH);
+  } else {
+    digitalWrite(BUZZER_PIN, on ? HIGH : LOW);
+  }
 }
 
 void updateBuzzer() {
   unsigned long now = millis();
-  if (!g_alarmActive) {
-    if (buzzerOn) { buzzerOn = false; buzzerWrite(false); }
+  if (g_calMode != CAL_NONE) {
+    if (now - lastBuzzerToggle >= 80) {
+      lastBuzzerToggle = now;
+      buzzerOn = !buzzerOn;
+      buzzerWrite(buzzerOn);
+    }
     return;
   }
+  
+  if (!g_alarmActive) {
+    if (buzzerOn) {
+      buzzerOn = false;
+      buzzerWrite(false);
+    }
+    return;
+  }
+  
   if (now - lastBuzzerToggle >= BEEP_FAST_MS) {
     lastBuzzerToggle = now;
     buzzerOn = !buzzerOn;
@@ -123,120 +95,80 @@ void updateBuzzer() {
   }
 }
 
-// ---------------- MPU6050 I2C ----------------
-bool mpuInit() {
-  Wire.beginTransmission(MPU_ADDR);
-  Wire.write(REG_PWR_MGMT_1);
-  Wire.write(0x00);
-  return (Wire.endTransmission() == 0);
-}
+// ---------------- Direct I2C functions for MPU6500 ----------------
+bool init6Axis() {
+  // 1. Wake up MPU and set clock source to auto-select PLL
+  Wire.beginTransmission(0x68);
+  Wire.write(0x6B); // PWR_MGMT_1
+  Wire.write(0x01); // Clock select Auto/PLL
+  if (Wire.endTransmission() != 0) return false;
+  delay(10);
 
-bool mpuReadRaw(int16_t* ax, int16_t* ay, int16_t* az,
-                 int16_t* gx, int16_t* gy, int16_t* gz) {
-  Wire.beginTransmission(MPU_ADDR);
-  Wire.write(REG_ACCEL_XOUT_H);
-  if (Wire.endTransmission(false) != 0) return false;
+  // 2. Configure Digital Low Pass Filter (DLPF) to 41Hz
+  // This drastically filters out high-frequency noise from motors & chassis vibrations
+  Wire.beginTransmission(0x68);
+  Wire.write(0x1A); // CONFIG
+  Wire.write(0x03); // Gyro DLPF = 41Hz
+  Wire.endTransmission();
 
-  Wire.requestFrom((int)MPU_ADDR, 14, true);
-  if (Wire.available() < 14) return false;
+  Wire.beginTransmission(0x68);
+  Wire.write(0x1D); // ACCEL_CONFIG_2
+  Wire.write(0x03); // Accel DLPF = 41Hz
+  Wire.endTransmission();
 
-  *ax = (Wire.read() << 8) | Wire.read();
-  *ay = (Wire.read() << 8) | Wire.read();
-  *az = (Wire.read() << 8) | Wire.read();
-  Wire.read(); Wire.read(); // skip temperature
-  *gx = (Wire.read() << 8) | Wire.read();
-  *gy = (Wire.read() << 8) | Wire.read();
-  *gz = (Wire.read() << 8) | Wire.read();
+  // 3. Set Full Scale Ranges to +/-2g and +/-250 deg/s for max sensitivity
+  Wire.beginTransmission(0x68);
+  Wire.write(0x1C); // ACCEL_CONFIG
+  Wire.write(0x00); // 2g Full Scale
+  Wire.endTransmission();
+
+  Wire.beginTransmission(0x68);
+  Wire.write(0x1B); // GYRO_CONFIG
+  Wire.write(0x00); // 250 deg/s Full Scale
+  Wire.endTransmission();
+
   return true;
 }
 
-void startCalibration() {
-  g_calState = CAL_RUNNING;
-  calCount = 0;
-  calSumGX = calSumGY = calSumGZ = 0;
-  calSumPitch = calSumRoll = 0;
-  Serial.println("Calibration started — hold still and level...");
+bool read6Axis(float &ax, float &ay, float &az, float &gx, float &gy, float &gz) {
+  Wire.beginTransmission(0x68);
+  Wire.write(0x3B); // ACCEL_XOUT_H
+  if (Wire.endTransmission(false) != 0) return false;
+
+  Wire.requestFrom(0x68, 14);
+  if (Wire.available() < 14) return false;
+
+  int16_t raw_ax = (Wire.read() << 8) | Wire.read();
+  int16_t raw_ay = (Wire.read() << 8) | Wire.read();
+  int16_t raw_az = (Wire.read() << 8) | Wire.read();
+  Wire.read(); Wire.read(); // skip temp
+  int16_t raw_gx = (Wire.read() << 8) | Wire.read();
+  int16_t raw_gy = (Wire.read() << 8) | Wire.read();
+  int16_t raw_gz = (Wire.read() << 8) | Wire.read();
+
+  ax = raw_ax / 16384.0f;
+  ay = raw_ay / 16384.0f;
+  az = raw_az / 16384.0f;
+  gx = raw_gx / 131.0f;
+  gy = raw_gy / 131.0f;
+  gz = raw_gz / 131.0f;
+
+  return true;
 }
 
-void updateSensorFusion() {
-  int16_t rax, ray, raz, rgx, rgy, rgz;
-  if (!mpuReadRaw(&rax, &ray, &raz, &rgx, &rgy, &rgz)) {
-    g_mpuOk = false;
-    return;
-  }
-  g_mpuOk = true;
-
-  g_ax = rax / ACCEL_SCALE;
-  g_ay = ray / ACCEL_SCALE;
-  g_az = raz / ACCEL_SCALE;
-  float rawGX = rgx / GYRO_SCALE;
-  float rawGY = rgy / GYRO_SCALE;
-  float rawGZ = rgz / GYRO_SCALE;
-
-  float pitchAcc = atan2(g_ay, sqrt(g_ax * g_ax + g_az * g_az)) * 180.0 / PI;
-  float rollAcc  = atan2(-g_ax, g_az) * 180.0 / PI;
-
-  // ---- Calibration collection (uses RAW values, before bias applied) ----
-  if (g_calState == CAL_RUNNING) {
-    calSumGX += rawGX;
-    calSumGY += rawGY;
-    calSumGZ += rawGZ;
-    calSumPitch += pitchAcc;
-    calSumRoll  += rollAcc;
-    calCount++;
-
-    if (calCount >= CAL_SAMPLES) {
-      gyroBiasX = calSumGX / CAL_SAMPLES;
-      gyroBiasY = calSumGY / CAL_SAMPLES;
-      gyroBiasZ = calSumGZ / CAL_SAMPLES;
-      pitchOffset = calSumPitch / CAL_SAMPLES;
-      rollOffset  = calSumRoll  / CAL_SAMPLES;
-
-      g_pitch = 0;
-      g_roll  = 0;
-      g_yaw   = 0;
-      g_calState = CAL_IDLE;
-      lastFusionMicros = micros(); // avoid a dt spike right after calibration
-      Serial.println("Calibration complete.");
-      return; // skip fusion this cycle, start clean next cycle
-    }
-  }
-
-  // ---- Apply calibration offsets ----
-  g_gx = rawGX - gyroBiasX;
-  g_gy = rawGY - gyroBiasY;
-  g_gz = rawGZ - gyroBiasZ;
-  float pitchAccCal = pitchAcc - pitchOffset;
-  float rollAccCal  = rollAcc  - rollOffset;
-
-  unsigned long nowMicros = micros();
-  float dt = (lastFusionMicros == 0) ? 0.02 : (nowMicros - lastFusionMicros) / 1000000.0;
-  lastFusionMicros = nowMicros;
-  if (dt <= 0 || dt > 0.5) dt = 0.02; // guard against startup/overflow spikes
-
-  g_pitch = COMPLEMENTARY_ALPHA * (g_pitch + g_gx * dt) + (1 - COMPLEMENTARY_ALPHA) * pitchAccCal;
-  g_roll  = COMPLEMENTARY_ALPHA * (g_roll  + g_gy * dt) + (1 - COMPLEMENTARY_ALPHA) * rollAccCal;
-
-  g_yaw += g_gz * dt;
-  if (g_yaw > 180.0) g_yaw -= 360.0;
-  if (g_yaw < -180.0) g_yaw += 360.0;
-
-  g_alarmActive = (fabs(g_pitch) > TILT_THRESHOLD_DEG) || (fabs(g_roll) > TILT_THRESHOLD_DEG);
-}
-
-// ---------------- Broadcast telemetry (fixed buffer, no String) ----------------
+// ---------------- Broadcast Telemetry ----------------
 void broadcastTelemetry() {
-  if (ws.count() == 0) return; // nobody listening, skip the work entirely
+  if (ws.count() == 0) return;
 
-  char buf[256];
+  char buf[324];
   snprintf(buf, sizeof(buf),
-    "{\"ok\":%s,\"cal\":%s,"
+    "{\"ok\":%s,\"calMode\":%u,"
     "\"ax\":%.3f,\"ay\":%.3f,\"az\":%.3f,"
     "\"gx\":%.2f,\"gy\":%.2f,\"gz\":%.2f,"
     "\"pitch\":%.2f,\"roll\":%.2f,\"yaw\":%.2f,"
     "\"alarm\":%s}",
     g_mpuOk ? "true" : "false",
-    (g_calState == CAL_RUNNING) ? "true" : "false",
+    (uint8_t)g_calMode,
     g_ax, g_ay, g_az,
     g_gx, g_gy, g_gz,
     g_pitch, g_roll, g_yaw,
@@ -245,33 +177,71 @@ void broadcastTelemetry() {
   ws.textAll(buf);
 }
 
-// ---------------- Web page ----------------
+// ---------------- Web page (Cleaned of Magnetometer) ----------------
 const char PAGE_HTML[] PROGMEM = R"HTML(
 <!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Wheelchair Motion Dashboard</title>
+<title>ESP32-S3 MPU6500 6-Axis Dashboard</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
-    background: #ffffff;
-    font-family: Arial, Helvetica, sans-serif;
-    color: #222;
+    background: #0f172a;
+    font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
+    color: #f8fafc;
     display: flex;
     flex-direction: column;
     align-items: center;
-    padding: 16px;
+    padding: 24px 16px;
+    min-height: 100vh;
   }
-  h1 { font-size: 5vw; margin-bottom: 10px; text-align: center; }
+  h1 { 
+    font-size: 24px; 
+    font-weight: 700; 
+    margin-bottom: 4px; 
+    text-align: center;
+    background: linear-gradient(135deg, #38bdf8, #818cf8);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .subtitle {
+    font-size: 14px;
+    color: #64748b;
+    margin-bottom: 24px;
+  }
+
+  .container {
+    width: 100%;
+    max-width: 960px;
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 24px;
+  }
+
+  @media (min-width: 768px) {
+    .container {
+      grid-template-columns: 1fr 1fr;
+    }
+  }
+
+  .card-3d {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 16px;
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 360px;
+  }
 
   #stage {
     width: 100%;
-    max-width: 480px;
-    height: 320px;
+    height: 280px;
     perspective: 900px;
-    margin-bottom: 14px;
   }
   #world {
     width: 100%; height: 100%;
@@ -281,125 +251,154 @@ const char PAGE_HTML[] PROGMEM = R"HTML(
   }
   #floor {
     position: absolute;
-    width: 400px; height: 400px;
+    width: 320px; height: 320px;
     top: 50%; left: 50%;
-    margin: -200px 0 0 -200px;
+    margin: -160px 0 0 -160px;
     background:
-      repeating-linear-gradient(0deg, #e8e8e8 0 1px, transparent 1px 40px),
-      repeating-linear-gradient(90deg, #e8e8e8 0 1px, transparent 1px 40px);
-    background-color: #fafafa;
-    transform: rotateX(90deg) translateZ(-70px);
-    border: 1px solid #ddd;
+      repeating-linear-gradient(0deg, #334155 0 1px, transparent 1px 40px),
+      repeating-linear-gradient(90deg, #334155 0 1px, transparent 1px 40px);
+    background-color: rgba(30, 41, 59, 0.5);
+    transform: rotateX(90deg) translateZ(-60px);
+    border: 2px solid #475569;
+    border-radius: 8px;
   }
   #chair {
     position: relative;
-    width: 160px; height: 160px;
+    width: 140px; height: 140px;
     transform-style: preserve-3d;
   }
   .part {
     position: absolute;
-    background: #3a6ea5;
-    border: 1px solid #2c5580;
+    background: #3b82f6;
+    border: 1px solid #1d4ed8;
   }
-  #seat   { width: 100px; height: 80px; left: 30px; top: 40px; transform: rotateX(90deg) translateZ(0px); background:#4a7fc0; }
-  #back   { width: 100px; height: 70px; left: 30px; top: -20px; transform-origin: bottom; background:#3a6ea5; }
-  #wheelL { width: 70px; height: 70px; left: -6px; top: 45px; border-radius: 50%; background: #333; transform: translateZ(-35px) rotateY(90deg); border: 4px solid #111; }
-  #wheelR { width: 70px; height: 70px; left: 96px; top: 45px; border-radius: 50%; background: #333; transform: translateZ(35px) rotateY(90deg); border: 4px solid #111; }
-  #casterL{ width: 20px; height: 20px; left: 20px; top: 130px; border-radius: 50%; background: #555; transform: translateZ(-45px); }
-  #casterR{ width: 20px; height: 20px; left: 120px; top: 130px; border-radius: 50%; background: #555; transform: translateZ(45px); }
+  #seat   { width: 90px; height: 70px; left: 25px; top: 35px; transform: rotateX(90deg) translateZ(0px); background: #3b82f6; box-shadow: inset 0 0 10px rgba(0,0,0,0.5); }
+  #back   { width: 90px; height: 60px; left: 25px; top: -25px; transform-origin: bottom; background: #2563eb; }
+  #wheelL { width: 60px; height: 60px; left: -10px; top: 40px; border-radius: 50%; background: #1e293b; transform: translateZ(-30px) rotateY(90deg); border: 5px solid #0f172a; }
+  #wheelR { width: 60px; height: 60px; left: 90px; top: 40px; border-radius: 50%; background: #1e293b; transform: translateZ(30px) rotateY(90deg); border: 5px solid #0f172a; }
+  #casterL{ width: 16px; height: 16px; left: 15px; top: 110px; border-radius: 50%; background: #475569; transform: translateZ(-35px); }
+  #casterR{ width: 16px; height: 16px; left: 109px; top: 110px; border-radius: 50%; background: #475569; transform: translateZ(35px); }
+
+  .metrics-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
 
   .grid {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
-    gap: 10px;
+    gap: 12px;
     width: 100%;
-    max-width: 480px;
   }
-  .card {
-    border: 1px solid #eee;
-    border-radius: 8px;
-    padding: 10px;
+  .metric-card {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 12px;
+    padding: 12px;
     text-align: center;
   }
-  .label { font-size: 2.6vw; color: #777; margin-bottom: 4px; }
-  .value { font-size: 4.2vw; font-weight: bold; }
+  .metric-label { font-size: 11px; color: #94a3b8; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.05em; }
+  .metric-value { font-size: 16px; font-weight: 700; color: #f1f5f9; font-family: monospace; }
 
-  #panel {
-    width: 100%; max-width: 480px;
-    margin-top: 12px;
-    padding: 12px;
-    border-radius: 10px;
+  #status-banner {
+    width: 100%;
+    padding: 16px;
+    border-radius: 12px;
     text-align: center;
     color: #fff;
-    background: #27ae60;
-    font-size: 4vw; font-weight: bold;
+    background: #059669;
+    font-size: 15px; 
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    transition: all 0.3s ease;
   }
-  #panel.alarm { background: #c0392b; animation: pulse 0.6s infinite alternate; }
-  #panel.error { background: #7f8c8d; }
-  #panel.calibrating { background: #e67e22; animation: pulse 0.4s infinite alternate; }
-  @keyframes pulse { from { opacity: 1; } to { opacity: 0.55; } }
+  #status-banner.alarm { background: #dc2626; box-shadow: 0 0 15px rgba(220, 38, 38, 0.4); }
+  #status-banner.error { background: #475569; }
+  #status-banner.calibrating { background: #ea580c; animation: pulse 0.5s infinite alternate; }
+  
+  .btn-group {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
 
-  #calBtn {
-    width: 100%; max-width: 480px;
-    margin-top: 10px;
+  .action-btn {
     padding: 14px;
     border: none;
-    border-radius: 10px;
-    background: #34495e;
+    border-radius: 12px;
+    background: #334155;
     color: #fff;
-    font-size: 4vw;
-    font-weight: bold;
+    font-size: 14px;
+    font-weight: 600;
     cursor: pointer;
+    transition: all 0.2s ease;
+    border: 1px solid #475569;
   }
-  #calBtn:active { opacity: 0.85; }
-  #calBtn:disabled { background: #95a5a6; }
+  .action-btn:hover { background: #475569; }
+  .action-btn:active { transform: scale(0.98); }
+  .action-btn:disabled { background: #1e293b; color: #64748b; border-color: #334155; cursor: not-allowed; }
+  .action-btn.primary { background: #2563eb; border-color: #3b82f6; }
+  .action-btn.primary:hover { background: #1d4ed8; }
 
-  @media (min-width: 600px) {
-    h1 { font-size: 24px; }
-    .label { font-size: 12px; }
-    .value { font-size: 20px; }
-    #panel { font-size: 18px; }
-    #calBtn { font-size: 16px; }
-  }
+  @keyframes pulse { from { opacity: 1; } to { opacity: 0.6; } }
 </style>
 </head>
 <body>
-  <h1>Wheelchair Motion Dashboard</h1>
+  <h1>MPU6500 6-Axis Diagnostic Lab</h1>
+  <div class="subtitle">Filtered Real-time Stream over Hardware I2C (SDA=5, SCL=6)</div>
 
-  <div id="stage">
-    <div id="world">
-      <div id="floor"></div>
-      <div id="chair">
-        <div class="part" id="back"></div>
-        <div class="part" id="seat"></div>
-        <div class="part" id="wheelL"></div>
-        <div class="part" id="wheelR"></div>
-        <div class="part" id="casterL"></div>
-        <div class="part" id="casterR"></div>
+  <div class="container">
+    <div class="card-3d">
+      <div id="stage">
+        <div id="world">
+          <div id="floor"></div>
+          <div id="chair">
+            <div class="part" id="back"></div>
+            <div class="part" id="seat"></div>
+            <div class="part" id="wheelL"></div>
+            <div class="part" id="wheelR"></div>
+            <div class="part" id="casterL"></div>
+            <div class="part" id="casterR"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="metrics-panel">
+      <div id="status-banner">CONNECTING TO WEBSOCKET...</div>
+
+      <!-- Accelerometer -->
+      <div class="grid">
+        <div class="metric-card"><div class="metric-label">Accel X</div><div class="metric-value" id="ax">--</div></div>
+        <div class="metric-card"><div class="metric-label">Accel Y</div><div class="metric-value" id="ay">--</div></div>
+        <div class="metric-card"><div class="metric-label">Accel Z</div><div class="metric-value" id="az">--</div></div>
+      </div>
+
+      <!-- Gyroscope -->
+      <div class="grid">
+        <div class="metric-card"><div class="metric-label">Gyro X</div><div class="metric-value" id="gx">--</div></div>
+        <div class="metric-card"><div class="metric-label">Gyro Y</div><div class="metric-value" id="gy">--</div></div>
+        <div class="metric-card"><div class="metric-label">Gyro Z</div><div class="metric-value" id="gz">--</div></div>
+      </div>
+
+      <!-- Angles -->
+      <div class="grid">
+        <div class="metric-card"><div class="metric-label">Pitch</div><div class="metric-value" id="pitch">--</div></div>
+        <div class="metric-card"><div class="metric-label">Roll</div><div class="metric-value" id="roll">--</div></div>
+        <div class="metric-card"><div class="metric-label">Yaw</div><div class="metric-value" id="yaw">--</div></div>
+      </div>
+
+      <div class="btn-group">
+        <button class="action-btn primary" id="calGyroBtn" onclick="calibrateGyro()">Calibrate Gyro &amp; Accel</button>
       </div>
     </div>
   </div>
-
-  <div class="grid">
-    <div class="card"><div class="label">Accel X</div><div class="value" id="ax">--</div></div>
-    <div class="card"><div class="label">Accel Y</div><div class="value" id="ay">--</div></div>
-    <div class="card"><div class="label">Accel Z</div><div class="value" id="az">--</div></div>
-    <div class="card"><div class="label">Gyro X</div><div class="value" id="gx">--</div></div>
-    <div class="card"><div class="label">Gyro Y</div><div class="value" id="gy">--</div></div>
-    <div class="card"><div class="label">Gyro Z</div><div class="value" id="gz">--</div></div>
-    <div class="card"><div class="label">Pitch</div><div class="value" id="pitch">--</div></div>
-    <div class="card"><div class="label">Roll</div><div class="value" id="roll">--</div></div>
-    <div class="card"><div class="label">Yaw</div><div class="value" id="yaw">--</div></div>
-  </div>
-
-  <div id="panel">CONNECTING...</div>
-  <button id="calBtn" onclick="calibrate()">Calibrate (Hold Level &amp; Still)</button>
 
 <script>
 var target = { pitch: 0, roll: 0, yaw: 0 };
 var current = { pitch: 0, roll: 0, yaw: 0 };
 var socket;
-var calibrating = false;
 
 function lerp(a, b, t) { return a + (b - a) * t; }
 
@@ -407,13 +406,13 @@ function connect() {
   socket = new WebSocket('ws://' + location.host + '/ws');
 
   socket.onopen = function() {
-    document.getElementById('panel').textContent = 'CONNECTED';
+    document.getElementById('status-banner').textContent = 'CONNECTED';
   };
 
   socket.onclose = function() {
-    var panel = document.getElementById('panel');
-    panel.className = 'error';
-    panel.textContent = 'CONNECTION LOST - RECONNECTING...';
+    var banner = document.getElementById('status-banner');
+    banner.className = 'error';
+    banner.textContent = 'CONNECTION LOST - RECONNECTING...';
     setTimeout(connect, 1000);
   };
 
@@ -421,34 +420,37 @@ function connect() {
 
   socket.onmessage = function(evt) {
     var d = JSON.parse(evt.data);
-    calibrating = d.cal;
-
-    document.getElementById('ax').textContent = d.ax.toFixed(2) + ' g';
-    document.getElementById('ay').textContent = d.ay.toFixed(2) + ' g';
-    document.getElementById('az').textContent = d.az.toFixed(2) + ' g';
-    document.getElementById('gx').textContent = d.gx.toFixed(1) + ' °/s';
-    document.getElementById('gy').textContent = d.gy.toFixed(1) + ' °/s';
-    document.getElementById('gz').textContent = d.gz.toFixed(1) + ' °/s';
+    
+    document.getElementById('ax').textContent = d.ax.toFixed(3) + ' g';
+    document.getElementById('ay').textContent = d.ay.toFixed(3) + ' g';
+    document.getElementById('az').textContent = d.az.toFixed(3) + ' g';
+    document.getElementById('gx').textContent = d.gx.toFixed(2) + ' °/s';
+    document.getElementById('gy').textContent = d.gy.toFixed(2) + ' °/s';
+    document.getElementById('gz').textContent = d.gz.toFixed(2) + ' °/s';
     document.getElementById('pitch').textContent = d.pitch.toFixed(1) + '°';
     document.getElementById('roll').textContent  = d.roll.toFixed(1) + '°';
     document.getElementById('yaw').textContent   = d.yaw.toFixed(1) + '°';
 
-    var panel = document.getElementById('panel');
-    var calBtn = document.getElementById('calBtn');
+    var btnGyro = document.getElementById('calGyroBtn');
+    var banner = document.getElementById('status-banner');
+
     if (!d.ok) {
-      panel.className = 'error';
-      panel.textContent = 'SENSOR ERROR - CHECK WIRING';
-    } else if (calibrating) {
-      panel.className = 'calibrating';
-      panel.textContent = 'CALIBRATING - HOLD STILL...';
+      banner.className = 'error';
+      banner.textContent = 'SENSOR FAULT - CHECK MPU6500 I2C';
+      btnGyro.disabled = true;
+    } else if (d.calMode === 1) {
+      banner.className = 'calibrating';
+      banner.textContent = 'CALIBRATING GYRO & ACCEL - KEEP STILL...';
+      btnGyro.disabled = true;
     } else if (d.alarm) {
-      panel.className = 'alarm';
-      panel.textContent = 'TILT ALARM';
+      banner.className = 'alarm';
+      banner.textContent = 'MPU6500 ACTIVE - TILT WARNING!';
+      btnGyro.disabled = false;
     } else {
-      panel.className = '';
-      panel.textContent = 'STABLE';
+      banner.className = '';
+      banner.textContent = 'MPU6500 ONLINE - STABLE';
+      btnGyro.disabled = false;
     }
-    calBtn.disabled = calibrating;
 
     target.pitch = d.pitch;
     target.roll  = d.roll;
@@ -456,8 +458,8 @@ function connect() {
   };
 }
 
-function calibrate() {
-  fetch('/calibrate');
+function calibrateGyro() {
+  fetch('/cal_gyro');
 }
 
 function animate() {
@@ -491,31 +493,89 @@ void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
   }
 }
 
+// ---------------- Tasks ----------------
+void calibrationTask(void* pvParameters) {
+  if (g_calMode == CAL_ACCEL_GYRO) {
+    Serial.println("[Lab] Calibrating Accel/Gyro. Hold board still and flat...");
+    calSumGX = calSumGY = calSumGZ = 0;
+    calSumPitch = calSumRoll = 0;
+    calCount = 0;
+    while (calCount < 100) {
+      float ax, ay, az, gx, gy, gz;
+      if (read6Axis(ax, ay, az, gx, gy, gz)) {
+        float pitchAcc = atan2(ay, sqrt(ax * ax + az * az)) * 180.0 / PI;
+        float rollAcc  = atan2(-ax, az) * 180.0 / PI;
+        calSumGX += gx;
+        calSumGY += gy;
+        calSumGZ += gz;
+        calSumPitch += pitchAcc;
+        calSumRoll += rollAcc;
+        calCount++;
+      }
+      delay(10);
+    }
+    gyroBiasX = calSumGX / 100.0f;
+    gyroBiasY = calSumGY / 100.0f;
+    gyroBiasZ = calSumGZ / 100.0f;
+    pitchOffset = calSumPitch / 100.0f;
+    rollOffset = calSumRoll / 100.0f;
+    g_pitch = 0;
+    g_roll = 0;
+    g_yaw = 0;
+    lastFusionMicros = micros();
+    Serial.println("[Lab] Accel/Gyro calibration complete.");
+  }
+  g_calMode = CAL_NONE;
+  vTaskDelete(NULL);
+}
+
+void scanI2C() {
+  Serial.println("[I2C Scanner] Scanning bus...");
+  int nDevices = 0;
+  for (byte address = 1; address < 127; address++) {
+    Wire.beginTransmission(address);
+    byte error = Wire.endTransmission();
+    if (error == 0) {
+      Serial.printf("  Found I2C device at address 0x%02X\n", address);
+      nDevices++;
+    }
+  }
+  if (nDevices == 0) {
+    Serial.println("  No I2C devices detected. Verify power, GND, SDA, SCL, and pull-up resistors.");
+  }
+}
+
 // ---------------- Setup ----------------
 void setup() {
   Serial.begin(115200);
   delay(1000);
-  Serial.println("--- GY-521 Wheelchair Motion Dashboard (Async) ---");
+  Serial.println("\n--- ESP32-S3 MPU6500 Diagnostics Lab ---");
 
   pinMode(BUZZER_PIN, OUTPUT);
   buzzerWrite(false);
 
-  Wire.begin(SDA_PIN, SCL_PIN);
-  Wire.setClock(400000);
-  if (mpuInit()) {
-    Serial.println("MPU6050 initialized OK.");
+  Wire.begin(SDA_PIN, SCL_PIN, 400000);
+  scanI2C();
+
+  // Initialize main MPU6500 chip
+  if (init6Axis()) {
+    g_mpuOk = true;
+    strcpy(g_chipName, "MPU6500");
+    Serial.println("MPU6500 initialized OK (6-Axis Mode).");
   } else {
-    Serial.println("MPU6050 init FAILED — check wiring (SDA=21, SCL=22).");
+    g_mpuOk = false;
+    Serial.println("MPU6500 initialization FAILED. Check wiring.");
   }
 
+  lastFusionMicros = micros();
+
+  // SoftAP setup
   WiFi.mode(WIFI_AP);
   WiFi.softAP(AP_SSID, AP_PASSWORD);
   IPAddress apIP = WiFi.softAPIP();
-  Serial.println("Access Point started.");
-  Serial.print("WiFi name: ");
-  Serial.println(AP_SSID);
-  Serial.print("Connect, then open in your browser: http://");
-  Serial.println(apIP);
+  Serial.println("SoftAP started.");
+  Serial.printf("SSID: %s | PWD: %s\n", AP_SSID, AP_PASSWORD);
+  Serial.printf("Access Dashboard at: http://%s\n", apIP.toString().c_str());
 
   ws.onEvent(onWsEvent);
   server.addHandler(&ws);
@@ -524,9 +584,14 @@ void setup() {
     request->send_P(200, "text/html", PAGE_HTML);
   });
 
-  server.on("/calibrate", HTTP_GET, [](AsyncWebServerRequest* request) {
-    startCalibration();
-    request->send(200, "text/plain", "ok");
+  server.on("/cal_gyro", HTTP_GET, [](AsyncWebServerRequest* request) {
+    if (g_calMode == CAL_NONE) {
+      g_calMode = CAL_ACCEL_GYRO;
+      xTaskCreatePinnedToCore(calibrationTask, "calTask", 4096, NULL, 1, NULL, 1);
+      request->send(200, "text/plain", "calibrating");
+    } else {
+      request->send(400, "text/plain", "busy");
+    }
   });
 
   server.onNotFound([](AsyncWebServerRequest* request) {
@@ -534,7 +599,7 @@ void setup() {
   });
 
   server.begin();
-  Serial.println("Async web server + WebSocket started.");
+  Serial.println("Dashboard WebServer running.");
 }
 
 // ---------------- Loop ----------------
@@ -543,12 +608,41 @@ void loop() {
 
   if (now - lastSensorRead >= SENSOR_INTERVAL_MS) {
     lastSensorRead = now;
-    updateSensorFusion();
+
+    if (g_mpuOk && g_calMode == CAL_NONE) {
+      if (read6Axis(g_ax, g_ay, g_az, g_gx, g_gy, g_gz)) {
+        float pitchAcc = atan2(g_ay, sqrt(g_ax * g_ax + g_az * g_az)) * 180.0 / PI;
+        float rollAcc  = atan2(-g_ax, g_az) * 180.0 / PI;
+
+        float calGX = g_gx - gyroBiasX;
+        float calGY = g_gy - gyroBiasY;
+        float calGZ = g_gz - gyroBiasZ;
+        float pitchAccCal = pitchAcc - pitchOffset;
+        float rollAccCal  = rollAcc  - rollOffset;
+
+        unsigned long nowMicros = micros();
+        float dt = (lastFusionMicros == 0) ? 0.05 : (nowMicros - lastFusionMicros) / 1000000.0;
+        lastFusionMicros = nowMicros;
+        if (dt <= 0 || dt > 0.5) dt = 0.05;
+
+        // Complementary filter for Pitch and Roll (smoothed and noise-free)
+        g_pitch = 0.98f * (g_pitch + calGX * dt) + 0.02f * pitchAccCal;
+        g_roll  = 0.98f * (g_roll  + calGY * dt) + 0.02f * rollAccCal;
+        
+        // Relative Yaw integration
+        g_yaw  += calGZ * dt;
+        if (g_yaw > 180.0) g_yaw -= 360.0;
+        if (g_yaw < -180.0) g_yaw += 360.0;
+
+        g_alarmActive = (fabs(g_pitch) > TILT_THRESHOLD_DEG) || (fabs(g_roll) > TILT_THRESHOLD_DEG);
+      } else {
+        g_mpuOk = false;
+      }
+    }
+    
     broadcastTelemetry();
   }
 
-  // Periodically clean up stale/disconnected WebSocket clients so
-  // they don't accumulate and slow things down over a long session.
   if (now - lastWsCleanup >= 2000) {
     lastWsCleanup = now;
     ws.cleanupClients();

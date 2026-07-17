@@ -69,7 +69,8 @@ sequenceDiagram
 
 > **Implementation:** the "Backend Timer" is a **Supabase scheduled function (pg_cron)** running
 > every ~10–30 s. It finds sessions crossing the warn/expiry thresholds, updates `rentals.state`,
-> and inserts `WARN_EXPIRY` / `END_SESSION` rows into `commands`, which the device polls and acks.
+> and inserts `WARN_EXPIRY` / `END_SESSION` rows into `commands`, which firmware receives via
+> `/ingest` responses and then acks.
 
 ## 3. Payment → unlock flow
 

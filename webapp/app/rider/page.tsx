@@ -8,9 +8,9 @@ import { useFleetState, DeviceState } from '../../hooks/useFleetState';
 import { supabase } from '../../utils/supabase';
 import {
   MapPin, Battery, ShieldAlert, Zap, Clock, CreditCard,
-  PlusCircle, CheckCircle2, Lock, AlertTriangle, XCircle, ShieldOff
+  PlusCircle, CheckCircle2, Lock, AlertTriangle, XCircle, ShieldOff,
+  RefreshCw
 } from 'lucide-react';
-import ClimateCard from '../../components/ClimateCard';
 
 // Dynamically import Leaflet Map to avoid Next.js SSR "window is not defined" crashes
 const Map = dynamic(() => import('../../components/Map'), {
@@ -30,6 +30,56 @@ export default function RiderPage() {
   const [timeLeft, setTimeLeft] = useState<number>(0);
   const [actionLoading, setActionLoading] = useState(false);
   const [seeding, setSeeding] = useState(false);
+  const [userCoords, setUserCoords] = useState<{ lat: number; lng: number } | null>(null);
+
+  // Request browser geolocation to show live distance and walking times
+  useEffect(() => {
+    if (typeof window !== 'undefined' && navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          setUserCoords({
+            lat: pos.coords.latitude,
+            lng: pos.coords.longitude
+          });
+        },
+        (err) => {
+          console.warn("User geolocation denied or unavailable. Falling back to default center.", err);
+          // Fall back to Karachi center coordinates near seeded chair
+          setUserCoords({ lat: 24.8588, lng: 67.0612 });
+        },
+        { enableHighAccuracy: true, timeout: 5000 }
+      );
+    }
+  }, []);
+
+  const getDistanceMeters = (lat1: number, lng1: number, lat2: number, lng2: number) => {
+    const R = 6371e3; // Earth's radius in meters
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLng = (lng2 - lng1) * Math.PI / 180;
+    const a = 
+      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * 
+      Math.sin(dLng / 2) * Math.sin(dLng / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return R * c;
+  };
+
+  const getDistanceText = (lat: number, lng: number) => {
+    if (!userCoords) return "Estimating distance...";
+    const d = getDistanceMeters(userCoords.lat, userCoords.lng, lat, lng);
+    const minWalk = Math.max(1, Math.round(d / 80)); // 80m per min average walking speed
+    if (d < 1000) {
+      return `${Math.round(d)}m away (${minWalk} min walk)`;
+    } else {
+      return `${(d / 1000).toFixed(1)} km away (${minWalk} min walk)`;
+    }
+  };
+
+  const getBatteryRangeText = (pct: number) => {
+    const km = (pct * 25 / 100).toFixed(0); // assume max 25km range
+    const hrs = (pct * 3.5 / 100).toFixed(1); // assume max 3.5 hours active runtime
+    return `~${km} km range (${hrs} hrs)`;
+  };
 
   // Cancel window tracking: 10% of total rental duration
   const [rentalTotalDuration, setRentalTotalDuration] = useState<number>(0);
@@ -60,17 +110,24 @@ export default function RiderPage() {
   // Filter for available chairs
   const availableChairs = deviceStates.filter(d => d.online && (!d.session_state || d.session_state === 'LOCKED' || d.session_state === 'AVAILABLE'));
   const selectedChair = deviceStates.find(d => d.wheelchair_id === selectedId);
+  const handleChairRowKeyDown = (event: React.KeyboardEvent<HTMLDivElement>, id: string) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      setSelectedId(id);
+    }
+  };
 
   // Computed live states: prefer local countdown timer for smooth 1s ticks, sync from server only if no local rental active
   const rentedChair = activeRental ? deviceStates.find(d => d.wheelchair_id === activeRental.wheelchair_id) : null;
   const displayTimeLeft = activeRental ? timeLeft : (rentedChair?.time_left ?? 0);
   const displaySessionState = rentedChair?.session_state || (activeRental ? (timeLeft <= 120 ? (timeLeft <= 0 ? "LOCKED" : "EXPIRING") : "ACTIVE") : "AVAILABLE");
-  const displayLocked = rentedChair?.locked !== undefined ? rentedChair.locked : (activeRental ? (timeLeft <= 0) : true);
-  const displaySpeedLimit = rentedChair?.speed_limit || 6;
+  const displayLocked = activeRental ? (timeLeft <= 0) : true;
+  const hardwareLocked = rentedChair?.locked !== undefined ? rentedChair.locked : true;
+
 
   // Session timer hook
   useEffect(() => {
-    if (!activeRental || timeLeft <= 0) return;
+    if (!activeRental) return;
     
     const interval = setInterval(() => {
       setTimeLeft(prev => {
@@ -83,7 +140,7 @@ export default function RiderPage() {
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [activeRental, timeLeft]);
+  }, [activeRental]);
 
   // Cancel window countdown timer (10% of rental time)
   useEffect(() => {
@@ -169,7 +226,17 @@ export default function RiderPage() {
       });
 
       const paymentResult = await res.json();
-      if (!res.ok) throw new Error(paymentResult.error || "Payment processing failed");
+      if (!res.ok) {
+        // Cancel the orphaned 'reserved' rental so failed webhook retries
+        // don't accumulate dead reservations (guard keeps us from touching a
+        // rental the webhook actually managed to activate).
+        await supabase
+          .from('rentals')
+          .update({ state: 'cancelled' })
+          .eq('id', rental.id)
+          .eq('state', 'reserved');
+        throw new Error(paymentResult.error || "Payment processing failed");
+      }
 
       // Deduct from simulated wallet
       updateWalletBalance(walletBalance - price);
@@ -192,7 +259,9 @@ export default function RiderPage() {
     }
   };
 
-  // Cancel Rental Handler (optimistic UI — clears instantly, commands fire in background)
+  // Cancel Rental Handler. The LOCK + END_SESSION dispatch is awaited and
+  // verified BEFORE the wallet refund and UI reset — otherwise a failed insert
+  // (RLS/network) refunds the rider while the chair keeps driving (W2).
   const handleCancelRental = async () => {
     if (!activeRental || cancelTimeLeft <= 0) return;
 
@@ -200,23 +269,32 @@ export default function RiderPage() {
     const durationMin = rentalTotalDuration / 60;
     const price = durationMin <= 1 ? 0 : durationMin <= 15 ? 5.00 : 10.00;
 
-    // Optimistic: clear UI immediately so button feels instant
-    if (price > 0) {
-      updateWalletBalance(walletBalance + price);
-    }
-    setActiveRental(null);
-    setTimeLeft(0);
-    setCancelDeadline(0);
-    setCancelTimeLeft(0);
-    setRentalTotalDuration(0);
+    setActionLoading(true);
+    try {
+      const { error: cmdError } = await supabase.from('commands').insert([
+        { wheelchair_id: targetId, cmd: 'LOCK', args: {}, status: 'pending', req_id: `cancel-lock-${Date.now()}` },
+        { wheelchair_id: targetId, cmd: 'END_SESSION', args: {}, status: 'pending', req_id: `cancel-end-${Date.now()}` }
+      ]);
 
-    // Fire commands to ESP32 in background (no await blocking UI)
-    supabase.from('commands').insert([
-      { wheelchair_id: targetId, cmd: 'LOCK', args: {}, status: 'pending', req_id: `cancel-lock-${Date.now()}` },
-      { wheelchair_id: targetId, cmd: 'END_SESSION', args: {}, status: 'pending', req_id: `cancel-end-${Date.now()}` }
-    ]).then(({ error }) => {
-      if (error) console.error('Cancel command dispatch error:', error);
-    });
+      if (cmdError) throw cmdError;
+
+      // Commands are queued — now it is safe to refund and clear the session.
+      if (price > 0) {
+        updateWalletBalance(walletBalance + price);
+      }
+      setActiveRental(null);
+      setTimeLeft(0);
+      setCancelDeadline(0);
+      setCancelTimeLeft(0);
+      setRentalTotalDuration(0);
+    } catch (err: any) {
+      alert(
+        `Cancellation failed: ${err.message || err}. ` +
+        'Your rental is still active and no refund was issued — please retry.'
+      );
+    } finally {
+      setActionLoading(false);
+    }
   };
 
   // Dispatch SOS command directly from Rider Panel
@@ -342,14 +420,19 @@ export default function RiderPage() {
                   <div className={`flex items-center gap-1 px-2.5 py-0.5 rounded-md text-xs font-semibold ${
                     displayLocked
                       ? "bg-red-500/10 text-red-400"
-                      : displaySessionState === "EXPIRING"
-                      ? "bg-amber-500/10 text-amber-400"
+                      : hardwareLocked
+                      ? "bg-blue-500/10 text-blue-400"
                       : "bg-emerald-500/10 text-emerald-400"
                   }`}>
                     {displayLocked ? (
                       <>
                         <Lock className="w-3.5 h-3.5" />
                         Locked
+                      </>
+                    ) : hardwareLocked ? (
+                      <>
+                        <RefreshCw className="w-3 h-3 animate-spin" />
+                        Unlocking
                       </>
                     ) : (
                       <>
@@ -360,7 +443,7 @@ export default function RiderPage() {
                   </div>
                 </div>
 
-                <div className="mt-4 flex items-center gap-4">
+                <div className="mt-4 flex items-stretch gap-3">
                   <div className="flex-1 bg-zinc-900 rounded-lg p-3 text-center">
                     <span className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider">Remaining</span>
                     <div className={`text-2xl font-bold font-mono mt-0.5 ${
@@ -373,10 +456,18 @@ export default function RiderPage() {
                       {formatTime(displayTimeLeft)}
                     </div>
                   </div>
-                  <div className="flex-1 bg-zinc-900 rounded-lg p-3 text-center">
-                    <span className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider">Speed Limit</span>
-                    <div className="text-2xl font-bold font-mono text-zinc-300 mt-0.5">{displaySpeedLimit} km/h</div>
-                  </div>
+
+                  {rentedChair && (
+                    <div className="flex-1 bg-zinc-900 rounded-lg p-3 text-center flex flex-col justify-center">
+                      <span className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider">Est. Range</span>
+                      <div className="text-xs font-bold text-emerald-400 mt-1">
+                        {getBatteryRangeText(rentedChair.batt_pct)}
+                      </div>
+                      <div className="text-[9px] text-zinc-500 mt-0.5 font-semibold">
+                        Battery: {rentedChair.batt_pct}%
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {/* Cancel Booking Button — available for first 10% of rental time */}
@@ -477,7 +568,11 @@ export default function RiderPage() {
                 {availableChairs.map((chair) => (
                   <div 
                     key={chair.wheelchair_id}
+                    role="button"
+                    tabIndex={0}
+                    aria-pressed={selectedId === chair.wheelchair_id}
                     onClick={() => setSelectedId(chair.wheelchair_id)}
+                    onKeyDown={(event) => handleChairRowKeyDown(event, chair.wheelchair_id)}
                     className={`p-4 rounded-xl border transition-all cursor-pointer flex justify-between items-center ${
                       selectedId === chair.wheelchair_id 
                         ? 'border-blue-500/60 bg-blue-500/5' 
@@ -487,14 +582,14 @@ export default function RiderPage() {
                     <div>
                       <h3 className="font-semibold text-sm">{chair.wheelchair_id}</h3>
                       <p className="text-zinc-500 text-xs mt-0.5 flex items-center gap-1">
-                        <MapPin className="w-3.5 h-3.5" />
-                        Karachi, Central
+                        <MapPin className="w-3.5 h-3.5 text-blue-500" />
+                        {getDistanceText(chair.lat, chair.lng)}
                       </p>
                     </div>
                     <div className="flex flex-col items-end gap-1.5">
                       <span className="flex items-center gap-1 text-xs text-zinc-400">
                         <Battery className="w-3.5 h-3.5 text-emerald-500" />
-                        {chair.batt_pct}%
+                        {getBatteryRangeText(chair.batt_pct)}
                       </span>
                       <span className="px-2 py-0.5 rounded bg-zinc-800 text-zinc-400 text-[10px] font-semibold">
                         Available
@@ -506,14 +601,7 @@ export default function RiderPage() {
             )}
           </div>
 
-          {/* Ambient climate for the contextual chair (rented or selected) */}
-          {(rentedChair || selectedChair) && (
-            <ClimateCard
-              tempC={(rentedChair || selectedChair)!.temp_amb}
-              humidity={(rentedChair || selectedChair)!.humidity}
-              compact
-            />
-          )}
+
 
           {/* Rent Box for Selected Chair */}
           <AnimatePresence mode="wait">
@@ -525,8 +613,16 @@ export default function RiderPage() {
                 className="glass-card p-5 rounded-xl space-y-4"
               >
                 <div>
-                  <h3 className="font-semibold text-sm">Rent {selectedChair.wheelchair_id}</h3>
-                  <p className="text-zinc-500 text-xs mt-0.5">Select a rental duration to pay and unlock.</p>
+                  <h3 className="font-semibold text-sm flex items-center justify-between gap-2">
+                    <span>Rent {selectedChair.wheelchair_id}</span>
+                    <span className="text-[10px] bg-blue-500/10 text-blue-400 px-2 py-0.5 rounded-full font-bold uppercase tracking-wider">
+                      {getDistanceText(selectedChair.lat, selectedChair.lng)}
+                    </span>
+                  </h3>
+                  <p className="text-zinc-400 text-xs mt-1.5 flex items-center gap-1.5">
+                    <Battery className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Battery Status: {getBatteryRangeText(selectedChair.batt_pct)} ({selectedChair.batt_pct}%)</span>
+                  </p>
                 </div>
 
                 <div className="grid grid-cols-3 gap-2">
@@ -703,7 +799,7 @@ export default function RiderPage() {
             </div>
             <div className="bg-zinc-900 p-3 rounded-lg border border-zinc-800 text-xs font-mono text-zinc-300">
               <div className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider mb-1">Broadcasting Live Location</div>
-              Coordinates: {rentedChair.lat.toFixed(6)}, {rentedChair.lng.toFixed(6)}
+              Coordinates: {(rentedChair.lat ?? 0).toFixed(6)}, {(rentedChair.lng ?? 0).toFixed(6)}
             </div>
             <p className="text-[10px] text-zinc-500 leading-normal">
               📡 Sending live coordinates to nearest emergency rescue dispatchers (Saudi Red Crescent Authority).

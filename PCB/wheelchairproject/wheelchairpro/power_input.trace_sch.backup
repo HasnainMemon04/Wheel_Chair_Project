@@ -1,0 +1,24 @@
+file_uid 7ea1de52-0b2b-433b-acfa-0a8e0d8a04cd
+paper "A4"
+title_block title "Wheelchair IoT - Block 1: Power Input Protection" date "2025-07-14" rev "E" company "24V Battery -> Fuse -> Reverse-Polarity MOSFET -> TVS -> V24V_PROT"
+comp #PWRGND02 power:PWR_FLAG PWR_FLAG @ 30,75 rot 0 pins (1=GND) uid 14f8b9d0-07d0-4642-bde4-0f0d9f8470a6
+comp #PWR06 power:GND GND @ 160,120 rot 0 pins (1=GND) uid 30a75a23-ea2e-4a25-9a14-eec2d6424607
+comp #PWR01 power:PWR_FLAG PWR_FLAG @ 30,87 rot 0 pins (1=V24V_RAW) uid 49b2220f-10cd-4e25-85ac-c4d5246e457c
+comp D3 Device:D_Zener BZX84B12 @ 148,117 rot 0 props { prop "footprint":"Package_TO_SOT_SMD:SOT-23" } pins (2=Q1_GATE,1=V24V_FUSED) uid 5b05078d-94d8-425b-a44e-9acb632bd821
+comp #PWR03 power:GND GND @ 30,160 rot 0 pins (1=GND) uid 84ae396f-fc95-49a5-b7fc-24a529c438d1
+comp #PWR05 power:GND GND @ 120,145 rot 0 pins (1=GND) uid 99416059-6ec8-42d5-a004-a2bfc5ac91d8
+comp J1 Connector:Screw_Terminal_01x02 24V_IN @ 30,100 rot 90 props { prop "footprint":"TerminalBlock_Phoenix:TerminalBlock_Phoenix_MKDS-1,5-2_1x02_P5.00mm_Horizontal" } pins (1=V24V_RAW,2=GND) uid ac4e7d00-380a-45a8-94d8-91b2f795c87c
+comp #PWR04 power:GND GND @ 90,132 rot 0 pins (1=GND) uid d1366d6e-45f3-4c36-a556-588eade6a899
+comp D1 Device:D_TVS SMBJ40A @ 160,100 rot 270 props { prop "footprint":"Diode_SMD:D_SMB" } pins (1=GND,2=V24V_PROT) uid dbd70a32-56b4-4983-9742-1c6d338d6431
+comp R1 Device:R 10k @ 120,125 rot 0 props { prop "footprint":"Resistor_SMD:R_0603_1608Metric" } pins (1=Q1_GATE,2=GND) uid ed218a51-a5ca-411e-ab94-ce49d47aaece
+comp D2 Device:D_TVS SMBJ40A @ 90,117 rot 270 props { prop "footprint":"Diode_SMD:D_SMB" } pins (1=GND,2=V24V_FUSED) uid ef0c2f2d-1cee-435e-90d2-5ed7fd8bffba
+comp Q1 Device:Q_PMOS RM8A5P60S8 @ 120,100 rot 90 props { prop "footprint":"Package_SO:SOIC-8_3.9x4.9mm_P1.27mm" } pins (S=V24V_FUSED,G=Q1_GATE,D=V24V_PROT) uid f032fbd7-2c89-4e9b-93fb-183bc5be41ff
+comp F1 Device:Polyfuse_Small "JK-SMD150L/33V" @ 65,100 rot 90 props { prop "footprint":"Fuse:Fuse_2920_7451Metric" } pins (1=V24V_RAW,2=V24V_FUSED) uid fe8fdf10-a17a-4a10-8590-dc599e908037
+net GND Q1_GATE V24V_FUSED V24V_PROT V24V_RAW
+glabel V24V_PROT @ 180,100 rot 0 shape output id GLBL1
+cwire CW1 D1.2 -> Q1.D net V24V_PROT
+cwiredef CW1 160,103.81 -> 158.75,104.14 -> 127,104.14 -> 127,96.52 -> 114.3,96.52 -> 114.3,97.79 -> 114.92,97.46
+cwire CW2 R1.1 -> Q1.G net Q1_GATE
+cwiredef CW2 120,121.19 -> 119.38,119.38 -> 119.38,105.41 -> 120,105.08
+cwire CW3 Q1.S -> F1.2 net V24V_FUSED
+cwiredef CW3 125.08,97.46 -> 124.46,96.52 -> 124.46,95.25 -> 67.31,95.25 -> 67.31,100.33 -> 67.54,100

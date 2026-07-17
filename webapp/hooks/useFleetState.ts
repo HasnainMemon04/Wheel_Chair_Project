@@ -13,28 +13,31 @@ export interface DeviceState {
   pitch: number;
   roll: number;
   tilt: number;
-  temp_motor: number;
+  yaw: number;
   temp_batt: number;
-  temp_amb: number;
-  humidity: number;
   batt_v: number;
   batt_pct: number;
-  occupied: boolean;
+  in_motion: boolean;
   tamper: boolean;
   tamper_count: number;
+  uptime: number | null;
   rssi: number;
   power: boolean;
   locked: boolean;
   session_state: string;
   time_left: number;
-  speed_limit: number;
-  over_speed: boolean;
+  fw_version?: string;
+  target_version?: string;
+  ota_status?: string;
+  ota_progress?: number;
+  ota_last_error?: string;
   geofence: {
     on: number;
     in: number;
     dist: number;
     r: number;
   } | null;
+  last_seen_local?: number;
 }
 
 export interface SafetyEvent {
@@ -56,8 +59,11 @@ export function useFleetState() {
   useEffect(() => {
     let active = true;
 
-    // 1. Fetch initial states
-    const fetchInitialData = async () => {
+    // Full fleet snapshot fetch. Called on mount AND on every Realtime
+    // (re)subscribe: postgres_changes does NOT replay rows changed while the
+    // websocket was down, so a refetch is the only way to heal stale state
+    // after a network blip (W1).
+    const fetchFleetData = async (isInitial: boolean) => {
       const url = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
       if (!url || url.includes('YOUR-PROJECT') || url.includes('placeholder-project')) {
         setLoading(false);
@@ -66,8 +72,8 @@ export function useFleetState() {
       }
 
       try {
-        setLoading(true);
-        
+        if (isInitial) setLoading(true);
+
         // Fetch current snapshot of device states
         const { data: statesData, error: statesError } = await supabase
           .from('device_state')
@@ -85,7 +91,19 @@ export function useFleetState() {
         if (eventsError) throw eventsError;
 
         if (active) {
-          setDeviceStates(statesData || []);
+          const now = Date.now();
+          const enriched = (statesData || []).map(d => {
+            if (!d.ts) return { ...d, last_seen_local: now, online: false };
+            const age = now - new Date(d.ts).getTime();
+            const shouldBeOnline = age < 5000;
+            return {
+              ...d,
+              last_seen_local: now - age,
+              online: shouldBeOnline
+            };
+          });
+
+          setDeviceStates(enriched);
           setEvents(eventsData || []);
           setError(null);
         }
@@ -111,7 +129,7 @@ export function useFleetState() {
       }
     };
 
-    fetchInitialData();
+    fetchFleetData(true);
 
     // 2. Subscribe to Supabase Realtime changes
     const channel = supabase
@@ -134,10 +152,10 @@ export function useFleetState() {
             const index = prev.findIndex((d) => d.wheelchair_id === updatedRow.wheelchair_id);
             if (index !== -1) {
               const next = [...prev];
-              next[index] = updatedRow;
+              next[index] = { ...updatedRow, last_seen_local: Date.now(), online: true };
               return next;
             } else {
-              return [...prev, updatedRow];
+              return [...prev, { ...updatedRow, last_seen_local: Date.now(), online: true }];
             }
           });
         }
@@ -153,7 +171,13 @@ export function useFleetState() {
         }
       )
       .subscribe((status) => {
-        // console.log("Realtime subscription status:", status);
+        // W1: refetch the full snapshot on every successful (re)subscribe —
+        // changes that happened while disconnected are never replayed.
+        if (status === 'SUBSCRIBED') {
+          fetchFleetData(false);
+        } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+          console.warn(`Realtime channel state: ${status}. Awaiting auto-reconnect; data may be stale until resubscribe.`);
+        }
       });
 
     // Cleanup
@@ -161,6 +185,29 @@ export function useFleetState() {
       active = false;
       supabase.removeChannel(channel);
     };
+  }, []);
+
+  // 3. Periodic timer to detect device offline state reactively based on local last_seen_local age
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setDeviceStates((prev) => {
+        let changed = false;
+        const now = Date.now();
+        const next = prev.map((d) => {
+          if (!d.last_seen_local) return d;
+          const age = now - d.last_seen_local;
+          const shouldBeOnline = age < 5000; // 5 seconds offline threshold
+          if (d.online !== shouldBeOnline) {
+            changed = true;
+            return { ...d, online: shouldBeOnline };
+          }
+          return d;
+        });
+        return changed ? next : prev;
+      });
+    }, 1000);
+
+    return () => clearInterval(timer);
   }, []);
 
   return { deviceStates, events, loading, error };

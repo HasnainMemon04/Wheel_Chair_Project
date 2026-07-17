@@ -1,0 +1,6 @@
+file_uid 76e39e4d-e544-4516-8ada-6f2987319d1a
+paper "A4"
+title_block title "Wheelchair IoT Telematics Module" date "2025-07-14" rev "E" company "Root Sheet - Hierarchical Design"
+text "Block 3-6 sheets will be added as design progresses." @ 30,110
+sheet "Power Rails" file power_rails.kicad_sch @ 110,40 size 60,40 page "3" uid 22d60448-0d29-4d96-8b5d-ceec838b0303
+sheet "Power Input" file power_input.kicad_sch @ 30,40 size 60,40 page "2" uid 237c2180-4b06-4867-a3ec-e31dd83c5b27

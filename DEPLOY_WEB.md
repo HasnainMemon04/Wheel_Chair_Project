@@ -45,7 +45,6 @@ Add the following key-value pairs in the **Environment Variables** section of th
 | `NEXT_PUBLIC_SUPABASE_URL` | Browser | Database Connection Endpoint | `https://txqjevrhedgsjltnflmg.supabase.co` |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Browser | Public anonymous database key | `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR4cWpldnJoZWRnc2psdG5mbG1nIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI4ODcyNDIsImV4cCI6MjA5ODQ2MzI0Mn0.y8vhajDI0f2p2dbDbdmN82WNs7x6jf9rbU_ojsGvP54` |
 | `SUPABASE_SERVICE_ROLE_KEY` | Server-Only | Privileged admin key (reconciles webhooks/RLS) | `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR4cWpldnJoZWRnc2psdG5mbG1nIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4Mjg4NzI0MiwiZXhwIjoyMDk4NDYzMjQyfQ.u8hh_MYE3tq2JgHLJTUWXKbea33Lwcy3y-Dax_MmWHc` |
-| `NEXT_PUBLIC_MAP_STYLE_URL` | Browser | Smooth 60fps Vector Map theme stylesheet | `https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json` |
 | `PAYMENT_PROVIDER` | Server-Only | Gateway type selection | `mock` |
 | `PAYMENT_WEBHOOK_SECRET` | Server-Only | Verification key for incoming mock payments | `super-secret-webhook-key-123` |
 

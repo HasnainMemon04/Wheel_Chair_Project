@@ -7,15 +7,10 @@ Every component you bought, and the feature it serves.
 | Component (from cart) | Qty | Used for | Feature |
 |-----------------------|-----|----------|---------|
 | ESP32-S3-WROOM-1 dev board | 1 | Main controller, WiFi, OTA | all |
-| NEO-6M GPS | 1 | Position, speed, satellites | 4, 5 |
-| MPU6050 (GY-521) | 1 | Tilt angle, fall detection | 9 |
-| DS18B20 probe (waterproof) | 1 | **Motor** temperature | 2 |
-| DS18B20 module | 1 | **Battery** temperature | 2 |
-| DHT22 | 1 | Ambient temp + humidity (context) | 2 |
-| SW-420 vibration sensor | 1 | Tamper (shock/movement while locked) | 10 |
-| SW-520D tilt switch | 1 | Cheap secondary tilt / tip-over backup | 9, 10 |
-| FSR 0.5" | 1 | Seat occupancy (rider present?) | 10, 13 |
-| 2-channel relay module | 1 | CH1 = main power, CH2 = motion lock | 1, 5, 13 |
+| NEO-M8N GPS | 1 | Position, speed, satellites | 4 |
+| MPU6500 IMU | 1 | Tilt angle, fall detection, tamper/shock, motion | 9, 10 |
+| DS18B20 probe (waterproof) | 1 | **Battery** temperature | 2 |
+| 2-channel relay module | 1 | CH1 = main power, CH2 = motion lock | 1, 13 |
 | Mini piezo buzzer | 1 | Expiry warning, tamper siren, alerts | 10, 13 |
 | LM2596 (with display) | 1 | Battery → regulated 5 V | power |
 | 18650 cells | 2 (parallel) | Electronics battery | power |
@@ -32,38 +27,29 @@ pack; keep as spares.
 
 ## 2. ESP32-S3 pin map
 
-> All pins below are safe on the ESP32-S3-WROOM-1. **Avoid** GPIO 0/3/45/46 (strapping),
-> 19/20 (USB), and 26–37 (flash/PSRAM). Analog inputs **must** be on ADC1 (GPIO 1–10),
-> because ADC2 is unusable while WiFi is on.
+> All pins below are safe on the ESP32-S3-WROOM-1. Pins matching the firmware's `config.h`.
 
 | Peripheral | Signal | GPIO | Bus / Notes |
 |------------|--------|------|-------------|
-| NEO-6M GPS | RX (← GPS TX) | 16 | UART1 @ 9600 |
-| NEO-6M GPS | TX (→ GPS RX) | 17 | optional |
-| MPU6050 | SDA | 21 | I²C @ 400 kHz |
-| MPU6050 | SCL | 22 | I²C (shared) |
-| DS18B20 ×2 | DATA | 4 | **OneWire bus** — both sensors share this pin, addressed by ROM ID; 4.7 kΩ pull-up to 3V3 |
-| DHT22 | DATA | 5 | 10 kΩ pull-up |
-| SW-520D tilt | DOUT | 14 | digital (internal pull-up) |
-| Battery V-sense | analog | 35 | ADC1, via divider (TODO: untested) |
-| Relay CH1 (main power) | IN1 | 25 | drive logic (TODO: untested); coil on 5 V |
-| Relay CH2 (motion lock) | IN2 | 26 | drive logic; coil on 5 V (RELAY_ACTIVE_LOW=true) |
-| Buzzer | + | 13 | PWM tone / active buzzer |
-| Status LED | — | 2 | onboard status LED |
+| NEO-M8N GPS | RX (← GPS TX) | 16 | UART1 @ 9600 |
+| NEO-M8N GPS | TX (→ GPS RX) | 17 | optional |
+| MPU6500 | SDA | 5 | I²C @ 400 kHz |
+| MPU6500 | SCL | 6 | I²C (shared) |
+| DS18B20 | DATA | 4 | **OneWire bus** — battery temperature probe; 4.7 kΩ pull-up to 3V3 |
+| Battery V-sense | analog | 1 | ADC1 (GPIO 1), via divider |
+| Relay CH1 (main power) | IN1 | 12 | drive logic |
+| Relay CH2 (motion lock) | IN2 | 13 | drive logic |
+| Buzzer 1 | + | 10 | PWM tone / active buzzer |
+| Buzzer 2 | + | 11 | PWM tone / active buzzer |
+| Status LED | — | 21 | onboard status LED |
 
 ## 3. Wiring per subsystem
 
-- **GPS:** VCC→3V3, GND→GND, TXD→GPIO16, RXD→GPIO17. Antenna with sky view.
-- **MPU6050:** VCC→3V3, GND→GND, SDA→21, SCL→22. (Address 0x68.)
-- **DS18B20 (both):** all three wires bussed in parallel — VCC→3V3, GND→GND, DATA→GPIO4,
-  one shared 4.7 kΩ pull-up between DATA and 3V3. Probe clamps to the motor body; module
-  mounts on the battery pack. Firmware reads each by its unique 64-bit ROM address.
-- **DHT22:** VCC→3V3 (or 5 V), DATA→GPIO5 (10 kΩ pull-up), GND→GND.
-- **SW-520D:** VCC→3V3, GND→GND, DOUT→GPIO14.
-- **Relay module:** VCC→**5 V** (from LM2596), GND→GND, IN1→GPIO25, IN2→GPIO26.
-  Opto-isolated boards accept 3.3 V logic on IN. **JD-VCC jumper:** keep it if powering
-  the coil from the same 5 V (simplest); remove + feed JD-VCC separately for isolation.
-- **Buzzer:** +→GPIO13, −→GND (active buzzer) or tone for passive.
+- **GPS:** VCC→3V3, GND→GND, TXD→GPIO16, RXD→GPIO17.
+- **MPU6500:** VCC→3V3, GND→GND, SDA→5, SCL→6. (Address 0x68.)
+- **DS18B20:** VCC→3V3, GND→GND, DATA→GPIO4, shared 4.7 kΩ pull-up between DATA and 3V3.
+- **Relay module:** VCC→**5 V** (from LM2596), GND→GND, IN1→GPIO12, IN2→GPIO13.
+- **Buzzer:** +→GPIO10 / GPIO11, −→GND.
 
 ## 4. Power subsystem
 

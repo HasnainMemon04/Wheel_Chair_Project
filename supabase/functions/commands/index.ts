@@ -56,11 +56,6 @@ serve(async (req) => {
     // 2. Initialize Supabase Service Role client
     const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? "";
     const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? "";
-    
-    console.log("Supabase URL:", supabaseUrl);
-    console.log("Service Key Length:", supabaseServiceKey.length);
-    console.log("Service Key Prefix:", supabaseServiceKey.substring(0, 10));
-    
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
     // 3. Query the registered wheelchair & its device key
@@ -123,6 +118,12 @@ serve(async (req) => {
 
       const body = JSON.parse(bodyText);
       const { id, req_id, ok, state } = body;
+      const epochToIso = (value: unknown): string | null => {
+        if (typeof value !== 'number' || !Number.isFinite(value) || value <= 1672531200) {
+          return null;
+        }
+        return new Date(value * 1000).toISOString();
+      };
 
       if (!id || !req_id) {
         return new Response(JSON.stringify({ error: 'Missing mandatory ack fields' }), {
@@ -143,6 +144,67 @@ serve(async (req) => {
         .eq('wheelchair_id', deviceId);
 
       if (ackError) throw ackError;
+
+      // C3: rental lifecycle reconciliation driven by DEVICE acks. The cron
+      // supervisor and payment transaction use deterministic req_ids keyed on
+      // the rental id: 'unlock-<uuid>' and 'end-<uuid>'.
+      const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (typeof req_id === 'string') {
+        if (req_id.startsWith('end-') && UUID_RE.test(req_id.slice(4))) {
+          const rentalId = req_id.slice(4);
+          if (ok) {
+            // Device confirmed the session end — only NOW is the rental ended.
+            const endedAt = epochToIso(body.session_end_ts) || new Date().toISOString();
+            await supabase
+              .from('rentals')
+              .update({ state: 'ended', end_at: endedAt })
+              .eq('id', rentalId)
+              .eq('state', 'ending');
+          }
+        } else if (req_id.startsWith('unlock-') && UUID_RE.test(req_id.slice(7))) {
+          const rentalId = req_id.slice(7);
+          if (ok) {
+            // Device consumed UNLOCK now — reconcile the cloud's wall-clock
+            // window to when the countdown ACTUALLY started (the command may
+            // have sat pending while the device was faulted or offline).
+            const { data: rentalRow } = await supabase
+              .from('rentals')
+              .select('duration_s')
+              .eq('id', rentalId)
+              .maybeSingle();
+            if (rentalRow?.duration_s) {
+              const reportedStartAt = epochToIso(body.session_start_ts);
+              const startAt = reportedStartAt ? new Date(reportedStartAt) : new Date();
+              const endAt = new Date(startAt.getTime() + rentalRow.duration_s * 1000);
+              await supabase
+                .from('rentals')
+                .update({ start_at: startAt.toISOString(), end_at: endAt.toISOString() })
+                .eq('id', rentalId)
+                .eq('state', 'active');
+            }
+          } else {
+            // M5: the device REFUSED to unlock (e.g. active safety fault).
+            // Surface it and cancel the companion commands so speed-limit /
+            // geofence changes are never applied to a chair that never unlocked.
+            await supabase
+              .from('rentals')
+              .update({ state: 'unlock_failed' })
+              .eq('id', rentalId)
+              .eq('state', 'active');
+            await supabase
+              .from('commands')
+              .update({ status: 'failed', acked_at: new Date().toISOString() })
+              .eq('wheelchair_id', deviceId)
+              .in('req_id', [`speed-${rentalId}`, `geofence-${rentalId}`])
+              .eq('status', 'pending');
+            await supabase.from('events').insert({
+              wheelchair_id: deviceId,
+              type: 'UNLOCK_FAILED',
+              detail: { rental_id: rentalId, reason: 'device rejected UNLOCK (active safety fault?)' }
+            });
+          }
+        }
+      }
 
       // Optimistically update device_state with the command result if applicable
       // This ensures desired state matches reported state in DB shadow

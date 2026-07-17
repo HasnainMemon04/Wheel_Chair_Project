@@ -4,7 +4,6 @@
 #include "config.h"
 
 // Track relay states locally
-static bool powerRelayState = false; // opposite default to trigger boot log
 static bool motionRelayState = true;  // opposite default to trigger boot log
 
 // Safety supervisor latches (file scope so applyActuatorStates can read them)
@@ -14,6 +13,10 @@ static bool fallLatched = false;
 static bool fallReported = false;
 static int fallBreachTicks = 0;
 
+// Sensor Fault latches
+static bool sensorFaultLatched = false;
+static bool sensorFaultReported = false;
+
 // Manual SOS latches
 static bool manualSOSLatched = false;
 static bool manualSOSReported = false;
@@ -21,7 +24,6 @@ static bool manualSOSReported = false;
 // Warnings and events latches
 static bool tiltWarnLatched = false;
 static bool geofenceExitLatched = false;
-static int overspeedTicks = 0;
 
 // Anti-tamper detection (SW-520D edge counting). Armed only while LOCKED.
 // 3 disturbances => warning chirps; the 4th latches a continuous siren until
@@ -33,29 +35,17 @@ static bool tamperArmed = false;
 static unsigned long lastTamperEventMs = 0;
 
 void initActuators() {
-    pinMode(RELAY_POWER_PIN, OUTPUT);
     pinMode(RELAY_MOTION_PIN, OUTPUT);
     pinMode(BUZZER_PIN, OUTPUT);
     pinMode(STATUS_LED_PIN, OUTPUT);
     
-    // Set default fail-safe state: Power ON, Motion LOCKED
-    setPowerRelay(true);
+    // Set default fail-safe state: Motion LOCKED
     setMotionRelay(false);
     
     // Simple startup buzzes
     buzzerChirp(2, 80);
 }
 
-void setPowerRelay(bool on) {
-    if (powerRelayState == on) return; // Don't write or log if already in this state
-    powerRelayState = on;
-    bool pinValue = on;
-    if (RELAY_ACTIVE_LOW) {
-        pinValue = !on;
-    }
-    digitalWrite(RELAY_POWER_PIN, pinValue ? HIGH : LOW);
-    Serial.printf("[Relay] POWER set to %s (pin write)\n", on ? "ON" : "OFF");
-}
 
 void setMotionRelay(bool allowMotion) {
     if (motionRelayState == allowMotion) return; // Don't write or log if already in this state
@@ -75,6 +65,7 @@ void buzzerWrite(bool on) {
     }
     digitalWrite(BUZZER_PIN, pinValue ? HIGH : LOW);
 }
+
 
 void buzzerChirp(int count, int delayMs) {
     for (int i = 0; i < count; i++) {
@@ -100,26 +91,30 @@ void applyActuatorStates() {
     xSemaphoreTake(stateMutex, portMAX_DELAY);
     bool power = sharedTelemetry.power_state;
     bool locked = sharedTelemetry.locked_state;
-    float tempMotor = sharedTelemetry.temp_motor;
     float tempBatt = sharedTelemetry.temp_battery;
-    float tilt = sharedTelemetry.tilt;
-    bool tiltSwActive = sharedTelemetry.tilt_switch_state;
+    float currentSpeed = sharedTelemetry.gps_speed_kmh;
     xSemaphoreGive(stateMutex);
 
-    bool safetyInterlockActive = (overtempLatched || fallLatched || manualSOSLatched);
+    bool safetyInterlockActive = (overtempLatched || fallLatched || manualSOSLatched || sensorFaultLatched);
 
     if (safetyInterlockActive) {
-        setPowerRelay(!overtempLatched);
         setMotionRelay(false);
     } else {
-        setPowerRelay(power);
-        if (power) {
+        // Safe-state interlock: Remote POWER OFF can only take effect if the chair is fully stopped (speed <= 0.1 km/h)
+        // If speed > 0.1, we override and keep motion allowed (if unlocked) to prevent severe stop hazards.
+        if (!power && currentSpeed > 0.1f) {
             setMotionRelay(!locked);
+            Serial.println("[Safety] Remote POWER OFF ignored because the wheelchair is in motion!");
         } else {
-            setMotionRelay(false);
+            if (power) {
+                setMotionRelay(!locked);
+            } else {
+                setMotionRelay(false);
+            }
         }
     }
 }
+
 
 // Manual SOS API controls
 void triggerManualSOS() {
@@ -137,7 +132,6 @@ void clearTamper() {
     tamperAlarmLatched = false;
     tamperWarnCount = 0;
     tamperReported = false;
-    resetTamperEdges();
     Serial.println("[Tamper] Cleared by operator/rider acknowledgment. Re-armed.");
 }
 
@@ -160,16 +154,13 @@ void safetySupervisorTask(void *pvParameters) {
 
         // Read shared state values
         xSemaphoreTake(stateMutex, portMAX_DELAY);
-        float tempMotor = sharedTelemetry.temp_motor;
         float tempBatt = sharedTelemetry.temp_battery;
         float tilt = sharedTelemetry.tilt;
         bool locked = sharedTelemetry.locked_state;
         bool power = sharedTelemetry.power_state;
         String state = sharedTelemetry.session_state;
         int timeLeft = sharedTelemetry.time_left_s;
-        int speedLimit = sharedTelemetry.speed_limit_kmh;
         float speedGps = sharedTelemetry.gps_speed_kmh;
-        bool tiltSwActive = sharedTelemetry.tilt_switch_state;
         bool vibrationActive = sharedTelemetry.vibration_state;
         bool insideGf = sharedTelemetry.gf.inside;
         float gfDist = sharedTelemetry.gf.dist_m;
@@ -177,34 +168,47 @@ void safetySupervisorTask(void *pvParameters) {
         bool gfOn = sharedTelemetry.gf.on;
         xSemaphoreGive(stateMutex);
 
-        // 1. OVERTEMP Interlock Check (Battery or Motor > 70 C)
-        if (tempMotor > TEMP_HOT_C || tempBatt > TEMP_HOT_C) {
-            if (!overtempLatched) {
-                overtempLatched = true;
-                Serial.printf("[Safety] OVERTEMP Breached! Motor: %.1f C, Batt: %.1f C\n", tempMotor, tempBatt);
+        // 1. SENSOR FAULT Check (Battery probe missing or failed/disconnected)
+        if (isnan(tempBatt)) {
+            if (!sensorFaultLatched) {
+                sensorFaultLatched = true;
+                Serial.printf("[Safety] SENSOR FAULT! Batt: %.1f C\n", tempBatt);
+                Serial.println("[Safety] Battery temperature probe NOT FOUND/DISCONNECTED — temperature is NOT monitored!");
             }
         }
-        // Hysteresis release: Only clear when BOTH fall below (70 C - 8 C) = 62 C
-        if (overtempLatched) {
-            if (tempMotor < (TEMP_HOT_C - TEMP_HYSTERESIS_C) && tempBatt < (TEMP_HOT_C - TEMP_HYSTERESIS_C)) {
-                overtempLatched = false;
-                overtempReported = false;
-                Serial.println("[Safety] OVERTEMP Cleared. Hysteresis band reset.");
+        if (sensorFaultLatched) {
+            if (!isnan(tempBatt)) {
+                sensorFaultLatched = false;
+                sensorFaultReported = false;
+                Serial.println("[Safety] SENSOR FAULT Cleared. Sensor readings restored.");
             }
         }
 
-        // 2. FALL Interlock Check (MPU6050 angle > 50 deg OR digital tilt switch)
+        // 2. OVERTEMP Interlock Check (Battery > 70 C)
+        // If there is a sensor fault, we treat it as a critical failure (handled by sensorFaultLatched above)
+        // We only check temperature thresholds if the sensor readings are valid (not NaN).
+        if (!isnan(tempBatt)) {
+            if (tempBatt > TEMP_HOT_C) {
+                if (!overtempLatched) {
+                    overtempLatched = true;
+                    Serial.printf("[Safety] OVERTEMP Breached! Batt: %.1f C\n", tempBatt);
+                }
+            }
+            // Hysteresis release: Only clear when it falls below (70 C - 8 C) = 62 C
+            if (overtempLatched) {
+                if (tempBatt < (TEMP_HOT_C - TEMP_HYSTERESIS_C)) {
+                    overtempLatched = false;
+                    overtempReported = false;
+                    Serial.println("[Safety] OVERTEMP Cleared. Hysteresis band reset.");
+                }
+            }
+        }
+
+        // 2. FALL Interlock Check (MPU6500 angle > 50 deg)
         bool fallBreached = false;
         if (tilt > TILT_FALL_DEG) {
-            // MPU6050 primary tilt breach - standard 500ms (10 ticks) debounce
             fallBreachTicks++;
             if (fallBreachTicks >= 10) {
-                fallBreached = true;
-            }
-        } else if (tiltSwActive && (!mpuOK || tilt > TILT_WARN_DEG)) {
-            // Digital switch breach - only if MPU6050 is offline or MPU6050 also confirms some tilt
-            fallBreachTicks++;
-            if (fallBreachTicks >= 30) {
                 fallBreached = true;
             }
         } else {
@@ -214,7 +218,7 @@ void safetySupervisorTask(void *pvParameters) {
         if (fallBreached) {
             if (!fallLatched) {
                 fallLatched = true;
-                Serial.printf("[Safety] FALL Breached! Tilt: %.1f deg, Switch: %d\n", tilt, tiltSwActive);
+                Serial.printf("[Safety] FALL Breached! Tilt: %.1f deg\n", tilt);
             }
         }
 
@@ -239,13 +243,17 @@ void safetySupervisorTask(void *pvParameters) {
             locked = true;
 
             // Report safety events to Supabase (non-blocking outside mutex)
+            if (sensorFaultLatched && !sensorFaultReported) {
+                sensorFaultReported = true;
+                reportSafetyEvent("SENSOR_FAULT", "{\"error\":\"Battery temp probe disconnected\"}");
+            }
             if (overtempLatched && !overtempReported) {
                 overtempReported = true;
-                reportSafetyEvent("OVERTEMP", "{\"temp_motor\":" + String(tempMotor) + ",\"temp_batt\":" + String(tempBatt) + "}");
+                reportSafetyEvent("OVERTEMP", "{\"temp_batt\":" + String(tempBatt) + "}");
             }
             if (fallLatched && !fallReported) {
                 fallReported = true;
-                reportSafetyEvent("FALL", "{\"tilt\":" + String(tilt) + ",\"switch\":" + String(tiltSwActive ? 1 : 0) + "}");
+                reportSafetyEvent("FALL", "{\"tilt\":" + String(tilt) + "}");
             }
             if (manualSOSLatched && !manualSOSReported) {
                 manualSOSReported = true;
@@ -257,22 +265,19 @@ void safetySupervisorTask(void *pvParameters) {
             // Local 1-second timer tick (runs once per second = 20 ticks)
             bool tickSecond = (loopTicks % 20 == 0);
 
-            // ---- Anti-tamper security (SW-520D), armed only while LOCKED ----
+            // ---- Anti-tamper security (MPU6500 accelerometer), armed only while LOCKED ----
             bool tamperArmedNow = (locked && state == "LOCKED");
             if (tamperArmedNow) {
                 if (!tamperArmed) {
                     tamperArmed = true;
-                    resetTamperEdges();
                 }
                 unsigned long nowMs = millis();
-                bool tiltSwitchTriggered = (tamperRecentEdges(nowMs) >= TAMPER_EDGE_THRESHOLD);
                 bool imuTriggered = vibrationActive;
 
                 if (!tamperAlarmLatched &&
-                    (tiltSwitchTriggered || imuTriggered) &&
+                    imuTriggered &&
                     (nowMs - lastTamperEventMs) > TAMPER_REFRACTORY_MS) {
                     lastTamperEventMs = nowMs;
-                    resetTamperEdges();          // consume this burst; count discrete events
                     tamperWarnCount++;
                     if (tamperWarnCount >= TAMPER_ALARM_AT) {
                         tamperAlarmLatched = true;
@@ -288,37 +293,14 @@ void safetySupervisorTask(void *pvParameters) {
                     }
                 }
             } else {
-                if (tamperArmed) resetTamperEdges();
                 tamperArmed = false;
                 tamperWarnCount = 0;
                 tamperAlarmLatched = false;
                 tamperReported = false;
             }
 
-            // Overspeed interlock & warning check (Rider state only)
-            if ((state == "ACTIVE" || state == "EXPIRING") && power && !locked) {
-                if (speedGps > speedLimit) {
-                    overspeedTicks++;
-                    if (overspeedTicks >= 100) { // 5 seconds grace period
-                        state = "LOCKED";
-                        locked = true;
-                        overspeedTicks = 0;
-                        reportSafetyEvent("OVERSPEED", "{\"speed\":" + String(speedGps) + ",\"limit\":" + String(speedLimit) + "}");
-                        Serial.println("[Safety] Sustained overspeed interlock triggered! Locked.");
-                    } else {
-                        if (loopTicks % 6 == 0) {
-                            buzzerBeepTicks = 2; // 100ms chirp
-                        }
-                    }
-                } else {
-                    overspeedTicks = 0;
-                }
-            } else {
-                overspeedTicks = 0;
-            }
-
             // Tilt Warning checks (MPU6050 tilt > 30 deg but <= 50 deg)
-            if (tilt > TILT_WARN_DEG && tilt <= TILT_FALL_DEG) {
+            if (!isnan(tilt) && tilt > TILT_WARN_DEG && tilt <= TILT_FALL_DEG) {
                 if ((loopTicks / 5) % 2 == 0) {
                     updateRGBLED(255, 120, 0);
                 } else {
@@ -331,7 +313,7 @@ void safetySupervisorTask(void *pvParameters) {
                         reportSafetyEvent("TILT_WARN", "{\"tilt\":" + String(tilt) + "}");
                     }
                 }
-            } else if (tilt < TILT_WARN_DEG - 3.0f) {
+            } else if (isnan(tilt) || tilt < TILT_WARN_DEG - 3.0f) {
                 tiltWarnLatched = false;
             }
 
@@ -340,13 +322,12 @@ void safetySupervisorTask(void *pvParameters) {
                 if (!geofenceExitLatched) {
                     geofenceExitLatched = true;
                     reportSafetyEvent("GEOFENCE_EXIT", "{\"dist\":" + String(gfDist) + ",\"radius\":" + String(gfRadius) + "}");
-                    Serial.println("[Safety] GEOFENCE_EXIT! Restricting speed limit to 2 km/h.");
+                    Serial.println("[Safety] GEOFENCE_EXIT! Device is outside authorized boundary.");
                 }
-                speedLimit = 2; // Restrict speed limit
             } else if (insideGf && geofenceExitLatched) {
                 geofenceExitLatched = false;
                 reportSafetyEvent("GEOFENCE_ENTER", "{}");
-                Serial.println("[Safety] GEOFENCE_ENTER. Speed limit restrictions lifted.");
+                Serial.println("[Safety] GEOFENCE_ENTER. Returned to safety zone.");
             }
 
             // Time Limit Auto-Expiration check (Rider state only)
@@ -376,9 +357,8 @@ void safetySupervisorTask(void *pvParameters) {
                         state = "LOCKED";
                         locked = true;
                     }
-                    int virtualRampedLimit = (speedLimit * (100 - endingRampTicks)) / 100;
                     if (endingRampTicks % 20 == 0) {
-                        Serial.printf("[Session] Decelerating... Target speed limit: %d km/h\n", virtualRampedLimit);
+                        Serial.printf("[Session] Decelerating... Ending session locks in progress\n");
                     }
                 }
             }
@@ -429,7 +409,6 @@ void safetySupervisorTask(void *pvParameters) {
 
         // 5. Update physical actuators based on final resolved states
         if (safetyInterlockActive) {
-            setPowerRelay(!overtempLatched);  // Complete power shutdown if overtemp
             setMotionRelay(false);            // Disables motion instantly
             buzzerWrite(true);                // Force continuous siren
             updateRGBLED(255, 0, 0);          // Red LED indicator
@@ -460,16 +439,22 @@ void safetySupervisorTask(void *pvParameters) {
                 }
             }
 
-            // Reflect power and lock states on relays
+            // Reflect lock states on motion relay
             if (power) {
-                setPowerRelay(true);
                 setMotionRelay(!locked);
             } else {
-                setPowerRelay(false);
                 setMotionRelay(false);
             }
         }
 
         vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(50)); // 20 Hz
     }
+}
+
+bool isSafetyFaultActive() {
+    return (overtempLatched || fallLatched || manualSOSLatched || sensorFaultLatched);
+}
+
+bool isOTASafetyFaultActive() {
+    return (overtempLatched || fallLatched || manualSOSLatched);
 }

@@ -1,0 +1,54 @@
+file_uid 99416059-6ec8-42d5-a004-a2bfc5ac91d8
+paper "A4"
+title_block title "Wheelchair IoT - Block 2: Power Rails" date "2025-07-14" rev "E" company "24V -> 5V Buck | 24V -> 3.8V Buck (Modem) | 24V -> 3.3V Buck (Logic)"
+comp R8 Device:R 300k @ 118,225 rot 0 props { prop "footprint":"Resistor_SMD:R_0603_1608Metric" } pins (1=V3V3,2=FB_3V3) uid 065bfd1e-0cdf-462a-b013-fc35a9d95bf5
+comp C10 Device:C 100nF @ 130,138 rot 0 props { prop "footprint":"Capacitor_SMD:C_0603_1608Metric" } pins (1=V3V8,2=GND) uid 073642d9-4363-41ed-af41-f1e28cdac78f
+comp #PWR17 power:GND GND @ 55,255 rot 0 pins (1=GND) uid 17656b00-00d7-4072-aa8f-9136909d3aa8
+comp #PWR13 power:GND GND @ 55,95 rot 0 pins (1=GND) uid 203de02c-2509-42f8-93ad-100b185529d9
+comp #PWR19 power:VCC V24V_PROT @ 80,133 rot 180 pins (1=V24V_PROT) uid 235e86ec-52dc-4f42-9e05-c0d96c85bff5
+comp R6 Device:R 300k @ 118,145 rot 0 props { prop "footprint":"Resistor_SMD:R_0603_1608Metric" } pins (1=V3V8,2=FB_3V8) uid 28862086-ab0c-4f95-860c-cdc5d7226d97
+comp C18 Device:C 12pF @ 105,225 rot 0 props { prop "footprint":"Capacitor_SMD:C_0603_1608Metric" } pins (1=FB_3V3,2=V3V3) uid 2ce8cef1-df59-4781-ab39-8d3e09b19e5b
+comp U2 wheelchairpro:TX4138 TX4138 @ 80,145 rot 0 props { prop "footprint":"Package_SO:SOIC-8-1EP_3.9x4.9mm_P1.27mm_EP2.71x3.7mm" } pins (1=SW_3V8,2=ILIM_3V8,3=V24V_PROT,4=GND,5=FB_3V8,6=NONE,7=NONE,8=BS_3V8,9=ILIM_3V8) uid 2d49fd9b-f2c3-4a20-b2c9-0aa04a180c5d
+comp D5 Device:D_Schottky SS510SMC @ 90,162 rot 270 props { prop "footprint":"Diode_SMD:D_SMC" } pins (2=SW_3V8,1=GND) uid 332f80fe-e273-4b8c-ac11-b3e715cf7bda
+comp #PWR18 power:GND GND @ 130,250 rot 0 pins (1=GND) uid 4f1214ad-1f77-4658-8515-8570be640007
+comp L1 Device:L 33uH @ 105,48 rot 90 props { prop "footprint":"Inductor_SMD:L_Bourns_SRR1260" } pins (1=SW_5V,2=V5V) uid 5630163a-92b0-46ee-81ab-59bdd78a0da4
+comp L3 Device:L 33uH @ 105,208 rot 90 props { prop "footprint":"Inductor_SMD:L_Bourns_SRR1260" } pins (1=SW_3V3,2=V3V3) uid 5eedc6cd-d8c4-477f-b77e-4470a81e225f
+comp C15 Device:C 10uF @ 130,218 rot 0 props { prop "footprint":"Capacitor_SMD:C_0805_2012Metric" } pins (1=V3V3,2=GND) uid 605c24a3-fe29-4f34-9a5d-c385bd01cb7c
+comp #PWR07 power:PWR_FLAG PWR_FLAG @ 130,46 rot 0 pins (1=V5V) uid 61025488-9dd3-4676-9ead-0e367ce6a58e
+comp C17 Device:C 12pF @ 105,145 rot 0 props { prop "footprint":"Capacitor_SMD:C_0603_1608Metric" } pins (1=FB_3V8,2=V3V8) uid 61b3d772-d489-4090-b89e-ec690dc04580
+comp C9 Device:C "470uF/10V" @ 130,152 rot 0 props { prop "footprint":"Capacitor_SMD:CP_Elec_8x10.5" } pins (1=V3V8,2=GND) uid 6256c0d0-4ab1-45df-a2d5-edce78965fde
+comp R7 Device:R 80.6k @ 118,158 rot 0 props { prop "footprint":"Resistor_SMD:R_0603_1608Metric" } pins (1=FB_3V8,2=GND) uid 65a56e88-6e77-4be4-8ea1-fe43c3580b4a
+comp C13 Device:C 100nF @ 130,232 rot 0 props { prop "footprint":"Capacitor_SMD:C_0603_1608Metric" } pins (1=V24V_PROT,2=GND) uid 707018a5-7ceb-4576-8877-0bfcf3e1aea3
+comp #PWR15 power:PWR_FLAG PWR_FLAG @ 130,206 rot 0 pins (1=V3V3) uid 77adaa22-882f-4b61-a0f8-eb05d17b995b
+comp U3 wheelchairpro:TX4138 TX4138 @ 80,225 rot 0 props { prop "footprint":"Package_SO:SOIC-8-1EP_3.9x4.9mm_P1.27mm_EP2.71x3.7mm" } pins (1=SW_3V3,2=ILIM_3V3,3=V24V_PROT,4=GND,5=FB_3V3,6=NONE,7=NONE,8=BS_3V3,9=ILIM_3V3) uid 78d64a44-fc48-4b0b-8e6b-76198f83966a
+comp R2 Device:R 30mR @ 55,60 rot 0 props { prop "footprint":"Resistor_SMD:R_1206_3216Metric" } pins (1=V24V_PROT,2=ILIM_5V) uid 8778040b-de32-459d-b42d-c85bdcbb30a9
+comp R9 Device:R 95.3k @ 118,238 rot 0 props { prop "footprint":"Resistor_SMD:R_0603_1608Metric" } pins (1=FB_3V3,2=GND) uid 8a24ed1a-f254-43c3-81bd-99b889c747c0
+comp R5 Device:R 30mR @ 55,140 rot 0 props { prop "footprint":"Resistor_SMD:R_1206_3216Metric" } pins (1=V24V_PROT,2=ILIM_3V8) uid 8a6218e9-1eca-4d35-b04f-1f5feb1447fe
+comp C6 Device:C 100nF @ 66,128 rot 0 props { prop "footprint":"Capacitor_SMD:C_0603_1608Metric" } pins (1=BS_3V8_SW,2=SW_3V8) uid 8bc88f9a-64b5-4f2d-ba93-7e89fa1c5820
+comp C5 Device:C 100nF @ 130,72 rot 0 props { prop "footprint":"Capacitor_SMD:C_0603_1608Metric" } pins (1=V5V,2=GND) uid 920e5cfd-5f22-4a97-8835-c9683849851c
+comp C4 Device:C "470uF/16V" @ 130,58 rot 0 props { prop "footprint":"Capacitor_SMD:CP_Elec_10x10.5" } pins (1=V5V,2=GND) uid 9602ea71-faf7-4fa5-8cc6-9b3111f8a4d4
+comp #PWR10 power:GND GND @ 80,95 rot 0 pins (1=GND) uid 9a9fabd3-da53-439b-bb1b-92dc5e2407bc
+comp R13 Device:R 5.1R @ 80,208 rot 90 props { prop "footprint":"Resistor_SMD:R_0603_1608Metric" } pins (1=BS_3V3,2=BS_3V3_SW) uid 9df3a240-1bb5-42e4-bb7a-f925d5d94e91
+comp C3 Device:C 100nF @ 55,80 rot 0 props { prop "footprint":"Capacitor_SMD:C_0603_1608Metric" } pins (1=V24V_PROT,2=GND) uid a1f6572a-9498-4e76-a9b8-7e38d7a454e5
+comp R3 Device:R 300k @ 118,65 rot 0 props { prop "footprint":"Resistor_SMD:R_0603_1608Metric" } pins (1=V5V,2=FB_5V) uid a315988e-9f75-478e-8556-3f394c3ef7d9
+comp R11 Device:R 5.1R @ 80,48 rot 90 props { prop "footprint":"Resistor_SMD:R_0603_1608Metric" } pins (1=BS_5V,2=BS_5V_SW) uid a626723b-2518-4652-b240-01d52ddd7e04
+comp #PWR16 power:GND GND @ 80,255 rot 0 pins (1=GND) uid aa4c9e24-cfbe-43c9-88ec-55606f8848da
+comp C1 Device:C 100nF @ 66,48 rot 0 props { prop "footprint":"Capacitor_SMD:C_0603_1608Metric" } pins (1=BS_5V_SW,2=SW_5V) uid b11b3f9f-8d4b-4690-b612-2297c789478b
+comp R12 Device:R 5.1R @ 80,128 rot 90 props { prop "footprint":"Resistor_SMD:R_0603_1608Metric" } pins (1=BS_3V8,2=BS_3V8_SW) uid b7e2c71c-d6cb-4d25-8bb3-e72cd4302b08
+comp D4 Device:D_Schottky SS510SMC @ 90,82 rot 270 props { prop "footprint":"Diode_SMD:D_SMC" } pins (2=SW_5V,1=GND) uid ca6fc66d-6705-4602-941b-0659f42cfe6b
+comp #PWR11 power:GND GND @ 80,175 rot 0 pins (1=GND) uid ca80b26d-f149-4543-9377-3edb7951a564
+comp #PWR_VIN02 power:PWR_FLAG PWR_FLAG @ 20,48 rot 0 pins (1=V24V_PROT) uid ca8d1cb3-cce4-44cc-94c7-13b8ae7f734e
+comp #PWR08 power:PWR_FLAG PWR_FLAG @ 130,126 rot 0 pins (1=V3V8) uid d0334732-e20e-4476-9e87-4b9aebf5fb14
+comp L2 Device:L 33uH @ 105,128 rot 90 props { prop "footprint":"Inductor_SMD:L_Bourns_SRR1260" } pins (1=SW_3V8,2=V3V8) uid d0606855-e86c-47de-abac-27f91e8a17f8
+comp R10 Device:R 30mR @ 55,220 rot 0 props { prop "footprint":"Resistor_SMD:R_1206_3216Metric" } pins (1=V24V_PROT,2=ILIM_3V3) uid dccf3b4c-39e1-4418-81d1-4ea24d0e9994
+comp C14 Device:C 100nF @ 66,208 rot 0 props { prop "footprint":"Capacitor_SMD:C_0603_1608Metric" } pins (1=BS_3V3_SW,2=SW_3V3) uid df512592-d276-4b70-b95d-e2561bde091c
+comp #PWR14 power:GND GND @ 55,175 rot 0 pins (1=GND) uid e6ceba36-180c-4717-bf62-a244d1de0a9e
+comp C16 Device:C 12pF @ 105,65 rot 0 props { prop "footprint":"Capacitor_SMD:C_0603_1608Metric" } pins (1=FB_5V,2=V5V) uid e79aeeca-489d-49bb-8040-d112673d4ceb
+comp #PWR12 power:GND GND @ 55,97 rot 0 pins (1=GND) uid e9cbb59a-3e50-4153-b7f3-4bf2dcde4c7a
+comp U1 wheelchairpro:TX4138 TX4138 @ 80,65 rot 0 props { prop "footprint":"Package_SO:SOIC-8-1EP_3.9x4.9mm_P1.27mm_EP2.71x3.7mm" } pins (1=SW_5V,2=ILIM_5V,3=V24V_PROT,4=GND,5=FB_5V,6=NONE,7=NONE,8=BS_5V,9=ILIM_5V) uid e9f1aae4-1535-40d3-aec0-c851ed340385
+comp #PWRGND_PR02 power:PWR_FLAG PWR_FLAG @ 20,175 rot 0 pins (1=GND) uid f6bf9b6f-8f7e-41ce-a88d-61203f7701b9
+comp C8 Device:C 100nF @ 55,160 rot 0 props { prop "footprint":"Capacitor_SMD:C_0603_1608Metric" } pins (1=V24V_PROT,2=GND) uid f8bb3200-733f-44a8-a3ef-2e6e0466c724
+comp D6 Device:D_Schottky SS510SMC @ 90,242 rot 270 props { prop "footprint":"Diode_SMD:D_SMC" } pins (2=SW_3V3,1=GND) uid fd09cb7d-c867-457e-a664-b9863bcc3442
+comp R4 Device:R 57.1k @ 118,78 rot 0 props { prop "footprint":"Resistor_SMD:R_0603_1608Metric" } pins (1=FB_5V,2=GND) uid fff155c5-6678-4098-b540-209538564161
+net BS_3V3 BS_3V3_SW BS_3V8 BS_3V8_SW BS_5V BS_5V_SW FB_3V3 FB_3V8 FB_5V GND ILIM_3V3 ILIM_3V8 ILIM_5V SW_3V3 SW_3V8 SW_5V V24V_PROT V3V3 V3V8 V5V
+glabel V24V_PROT @ 20,60 rot 0 shape input id GLBL1

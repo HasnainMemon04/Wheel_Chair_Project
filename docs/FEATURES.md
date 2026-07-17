@@ -102,7 +102,7 @@ Each feature lists: **inputs**, **behavior**, **outputs/actions**, and **accepta
   - OTA is blocked during active motion.
 
 ## F13 — Rental Session Control
-- **Inputs:** session start (paid), session timer, payment events, occupancy, `cmd` lock/unlock.
+- **Inputs:** session start (paid), session timer, payment events, motion status, `cmd` lock/unlock.
 - **Behavior:** full state machine in **RENTAL.md**. Summary: pay → UNLOCK + start timer;
   near expiry → warn (buzzer + app); expiry → graceful stop → LOCK; reactivate only on new
   payment or authorized operator unlock.

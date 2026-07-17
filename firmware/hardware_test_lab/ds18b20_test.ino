@@ -3,7 +3,7 @@
 #include <DallasTemperature.h>
 
 // Exact OneWire pin
-#define ONEWIRE_PIN 4
+#define ONEWIRE_PIN 8
 
 OneWire oneWire(ONEWIRE_PIN);
 DallasTemperature sensors(&oneWire);

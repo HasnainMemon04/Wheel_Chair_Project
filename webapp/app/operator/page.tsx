@@ -7,10 +7,9 @@ import { useFleetState } from '../../hooks/useFleetState';
 import { supabase } from '../../utils/supabase';
 import {
   Zap, Battery, ShieldAlert, Thermometer, Radio,
-  MapPin, Sliders, Play, Square, Unlock, Lock, RefreshCw, AlertTriangle, ShieldOff
+  MapPin, Sliders, Play, Square, Unlock, Lock, RefreshCw, AlertTriangle, ShieldOff, Trash2
 } from 'lucide-react';
 import Link from 'next/link';
-import ClimateCard from '../../components/ClimateCard';
 
 // Dynamic import to bypass Next.js SSR window check
 const Map = dynamic(() => import('../../components/Map'), {
@@ -26,38 +25,54 @@ const Map = dynamic(() => import('../../components/Map'), {
 export default function OperatorPage() {
   const { deviceStates, events, loading, error } = useFleetState();
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'fleet' | 'alerts'>('fleet');
+  const [activeTab, setActiveTab] = useState<'fleet' | 'alerts' | 'firmware'>('fleet');
   const [actionLoading, setActionLoading] = useState(false);
-  
+
+  // OTA management states
+  const [uploading, setUploading] = useState(false);
+  const [fwVersionInput, setFwVersionInput] = useState("");
+  const [fwNotesInput, setFwNotesInput] = useState("");
+  const [releases, setReleases] = useState<any[]>([]);
+  const [selectedReleaseId, setSelectedReleaseId] = useState<string>("");
+  const [otaError, setOtaError] = useState<string | null>(null);
+  const [otaRolloutFleetWide, setOtaRolloutFleetWide] = useState(false);
+
   // Custom inputs for commands
-  const [speedLimit, setSpeedLimit] = useState<number>(6);
   const [gfRadius, setGfRadius] = useState<number>(300);
   const [gfLat, setGfLat] = useState<string>("24.860048");
   const [gfLng, setGfLng] = useState<string>("67.063734");
 
   // Track pending command states for each chair to support Optimistic UI
   const [pendingStates, setPendingStates] = useState<Record<string, { power?: boolean; locked?: boolean; ts?: number }>>({});
-  const [latencyMs, setLatencyMs] = useState<number | null>(null);
+  // Seconds since the selected chair's last telemetry (ts is real wall-clock
+  // now that the firmware syncs SNTP). Updated at 1 Hz — not 10 Hz.
+  const [lastSeenS, setLastSeenS] = useState<number | null>(null);
 
   const selectedChair = deviceStates.find((d) => d.wheelchair_id === selectedId);
+  const handleDeviceRowKeyDown = (event: React.KeyboardEvent<HTMLDivElement>, id: string) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      setSelectedId(id);
+    }
+  };
 
   // Prefill geofence coordinates when a new device is selected
   useEffect(() => {
     if (selectedChair) {
-      setGfLat(selectedChair.lat.toFixed(6));
-      setGfLng(selectedChair.lng.toFixed(6));
+      setGfLat((selectedChair.lat ?? 0).toFixed(6));
+      setGfLng((selectedChair.lng ?? 0).toFixed(6));
       if (selectedChair.geofence) {
         setGfRadius(selectedChair.geofence.r);
       }
     }
-  }, [selectedId]);
+  }, [selectedChair]);
 
   // Reconcile optimistic states with incoming DB updates
   useEffect(() => {
     setPendingStates((prev) => {
       const next = { ...prev };
       let changed = false;
-      
+
       deviceStates.forEach((d) => {
         const pending = next[d.wheelchair_id];
         if (!pending) return;
@@ -83,19 +98,37 @@ export default function OperatorPage() {
     });
   }, [deviceStates]);
 
-  // Calculate latency based on age of the last update
+  // Age of the selected chair's last telemetry update, refreshed once per
+  // second (was a 10Hz interval driving full-page re-renders for an unused value).
   const lastUpdate = selectedChair ? new Date(selectedChair.ts).getTime() : 0;
   useEffect(() => {
     if (!lastUpdate) {
-      setLatencyMs(null);
+      setLastSeenS(null);
       return;
     }
-    const interval = setInterval(() => {
-      const age = Date.now() - lastUpdate;
-      setLatencyMs(age > 0 ? age : 0);
-    }, 100);
+    const tick = () => setLastSeenS(Math.max(0, Math.floor((Date.now() - lastUpdate) / 1000)));
+    tick();
+    const interval = setInterval(tick, 1000);
     return () => clearInterval(interval);
   }, [lastUpdate]);
+
+  // Human-readable device uptime (real uptime from telemetry `up`, persisted
+  // in device_state.uptime — the old header mislabeled the ts time-of-day).
+  const formatUptime = (s: number | null | undefined) => {
+    if (s == null || isNaN(s)) return '—';
+    const d = Math.floor(s / 86400);
+    const h = Math.floor((s % 86400) / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    if (d > 0) return `${d}d ${h}h`;
+    if (h > 0) return `${h}h ${m}m`;
+    return `${m}m ${s % 60}s`;
+  };
+  const formatLastSeen = (s: number | null) => {
+    if (s == null) return '—';
+    if (s > 3600) return '>1h ago';
+    if (s >= 60) return `${Math.floor(s / 60)}m ${s % 60}s ago`;
+    return `${s}s ago`;
+  };
 
   const pending = pendingStates[selectedId || ''];
   const displayPower = pending?.power !== undefined ? pending.power : (selectedChair?.power ?? false);
@@ -107,7 +140,7 @@ export default function OperatorPage() {
   const triggerCommand = async (cmd: string, args: any = {}) => {
     if (!selectedId) return;
     setActionLoading(true);
-    
+
     // Write to optimistic state immediately
     if (cmd === 'LOCK') {
       setPendingStates(prev => ({ ...prev, [selectedId]: { ...prev[selectedId], locked: true, ts: Date.now() } }));
@@ -144,11 +177,256 @@ export default function OperatorPage() {
     }
   };
 
+  const fetchReleases = async () => {
+    const { data, error } = await supabase
+      .from('firmware_releases')
+      .select('*')
+      .order('created_at', { ascending: false });
+    if (!error && data) {
+      setReleases(data);
+      if (data.length > 0) {
+        setSelectedReleaseId(data[0].id.toString());
+      }
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'firmware') {
+      fetchReleases();
+    }
+  }, [activeTab]);
+
+  // Browser-based emergency audio alarm player (oscillator synth)
+  useEffect(() => {
+    let audioCtx: AudioContext | null = null;
+    let interval: any = null;
+
+    const hasCriticalOvertemp = selectedChair && selectedChair.temp_batt != null && selectedChair.temp_batt > 55.0;
+    const hasCriticalFall = selectedChair && selectedChair.tilt != null && selectedChair.tilt > 50.0;
+    const hasCriticalSOS = selectedChair && selectedChair.session_state === 'SAFE_FAULT';
+
+    const alarmActive = selectedChair && (hasCriticalOvertemp || hasCriticalFall || hasCriticalSOS);
+
+    if (alarmActive) {
+      // Start browser audio synthesis loop
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      if (AudioContextClass) {
+        audioCtx = new AudioContextClass();
+        
+        interval = setInterval(() => {
+          if (!audioCtx || audioCtx.state === 'suspended') return;
+          
+          try {
+            const osc = audioCtx.createOscillator();
+            const gainNode = audioCtx.createGain();
+            
+            osc.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+            
+            osc.type = 'sawtooth';
+            // Pulsing alternating frequencies (high pitched rescue sweep sound)
+            const time = audioCtx.currentTime;
+            osc.frequency.setValueAtTime(880, time);
+            osc.frequency.linearRampToValueAtTime(1200, time + 0.25);
+            
+            gainNode.gain.setValueAtTime(0.08, time);
+            gainNode.gain.exponentialRampToValueAtTime(0.005, time + 0.28);
+            
+            osc.start(time);
+            osc.stop(time + 0.3);
+          } catch (e) {
+            console.error("Audio beep synthesis error:", e);
+          }
+        }, 600);
+      }
+    }
+
+    return () => {
+      if (interval) clearInterval(interval);
+      if (audioCtx) {
+        try {
+          audioCtx.close();
+        } catch (e) {}
+      }
+    };
+  }, [selectedChair?.session_state, selectedChair?.tilt, selectedChair?.temp_batt]);
+
+  const handleFwUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (!fwVersionInput) {
+      alert("Please enter a target release version string (e.g. 0.2.0) first.");
+      return;
+    }
+
+    try {
+      setUploading(true);
+      setOtaError(null);
+
+      // Upload binary to Supabase storage firmware bucket
+      const filePath = `releases/${fwVersionInput}/${file.name}`;
+      const { data: uploadData, error: uploadError } = await supabase.storage
+        .from('firmware')
+        .upload(filePath, file, { upsert: true });
+
+      if (uploadError) throw uploadError;
+
+      // Get public URL
+      const { data: { publicUrl } } = supabase.storage
+        .from('firmware')
+        .getPublicUrl(filePath);
+
+      // Save release metadata
+      const { error: dbError } = await supabase
+        .from('firmware_releases')
+        .insert({
+          version: fwVersionInput,
+          url: publicUrl,
+          size: file.size,
+          notes: fwNotesInput || null
+        });
+
+      if (dbError) throw dbError;
+
+      alert("Firmware release successfully uploaded and registered!");
+      setFwVersionInput("");
+      setFwNotesInput("");
+      fetchReleases();
+    } catch (err: any) {
+      console.error("Error uploading firmware:", JSON.stringify(err));
+      setOtaError(err?.message || err?.error_description || err?.statusText || JSON.stringify(err) || "Failed to upload firmware binary.");
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handlePushOTA = async () => {
+    if (!selectedId) {
+      alert("Please select a wheelchair from the list first.");
+      return;
+    }
+
+    const rel = releases.find(r => r.id.toString() === selectedReleaseId);
+    if (!rel) {
+      alert("Please select a valid release to push.");
+      return;
+    }
+
+    // W3: build the target set EXPLICITLY. The selected chair is always
+    // included (the old `deviceStates.slice(0, 2)` could silently skip it),
+    // then fill remaining canary slots (max 2 total) from the rest of the fleet.
+    const targetIds = otaRolloutFleetWide
+      ? Array.from(new Set([selectedId, ...deviceStates.map(d => d.wheelchair_id)])).slice(0, 2)
+      : [selectedId];
+
+    if (otaRolloutFleetWide) {
+      const confirmPush = confirm(
+        `Staged canary rollout: firmware v${rel.version} will be pushed to exactly these chairs:\n\n` +
+        `  ${targetIds.join('\n  ')}\n\nProceed?`
+      );
+      if (!confirmPush) return;
+    }
+
+    try {
+      setActionLoading(true);
+      setOtaError(null);
+
+      for (const targetId of targetIds) {
+        // Set target_version
+        const { error: fwError } = await supabase
+          .from('wheelchairs')
+          .update({
+            target_version: rel.version,
+            ota_status: 'pending',
+            ota_progress: 0,
+            ota_last_error: null
+          })
+          .eq('id', targetId);
+
+        if (fwError) throw fwError;
+
+        // Insert command
+        const reqId = 'req-ota-' + Math.random().toString(36).substr(2, 9);
+        const { error: cmdError } = await supabase
+          .from('commands')
+          .insert({
+            wheelchair_id: targetId,
+            cmd: 'OTA',
+            req_id: reqId,
+            status: 'pending',
+            args: {
+              url: rel.url,
+              version: rel.version,
+              size: rel.size
+            }
+          });
+
+        if (cmdError) throw cmdError;
+
+        // Trigger local OTA_STARTED event log. supabase-js resolves (does not
+        // throw) on RLS denial, so the error must be checked explicitly (W7).
+        const { error: evError } = await supabase.from('events').insert({
+          wheelchair_id: targetId,
+          type: 'OTA_STARTED',
+          detail: { target_version: rel.version }
+        });
+        if (evError) {
+          console.error('OTA_STARTED audit event insert failed:', evError);
+          setOtaError(`OTA pushed to ${targetId}, but the audit event failed to record: ${evError.message}`);
+        }
+      }
+
+      alert(`OTA upgrade command successfully triggered!`);
+    } catch (err: any) {
+      console.error("Error pushing OTA:", JSON.stringify(err));
+      setOtaError(err?.message || err?.error_description || err?.statusText || JSON.stringify(err) || "Failed to trigger OTA upgrade.");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleDeleteRelease = async (releaseId: string, version: string) => {
+    const confirmDelete = confirm(`Delete firmware release v${version}? This will remove the binary from storage and the database record.`);
+    if (!confirmDelete) return;
+
+    try {
+      setActionLoading(true);
+      setOtaError(null);
+
+      // Find release to get storage path
+      const rel = releases.find(r => r.id.toString() === releaseId);
+
+      // Delete from storage (best effort — file may not exist)
+      if (rel) {
+        const urlParts = rel.url.split('/firmware/');
+        if (urlParts[1]) {
+          await supabase.storage.from('firmware').remove([urlParts[1]]);
+        }
+      }
+
+      // Delete from database
+      const { error } = await supabase
+        .from('firmware_releases')
+        .delete()
+        .eq('id', releaseId);
+
+      if (error) throw error;
+
+      fetchReleases();
+    } catch (err: any) {
+      console.error('Error deleting release:', JSON.stringify(err));
+      setOtaError(err?.message || JSON.stringify(err) || 'Failed to delete release.');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
   const getEventBadgeClass = (type: string) => {
-    if (['FALL', 'OVERTEMP', 'TAMPER'].includes(type)) {
+    if (['FALL', 'OVERTEMP', 'TAMPER', 'OTA_FAIL', 'UNLOCK_FAILED'].includes(type)) {
       return 'bg-red-500/10 text-red-400 border border-red-500/20';
     }
-    if (['TILT_WARN', 'OVERSPEED', 'GEOFENCE_EXIT'].includes(type)) {
+    if (['TILT_WARN', 'OVERSPEED', 'GEOFENCE_EXIT', 'OTA_DEFERRED', 'SESSION_END_OFFLINE'].includes(type)) {
       return 'bg-amber-500/10 text-amber-400 border border-amber-500/20';
     }
     return 'bg-blue-500/10 text-blue-400 border border-blue-500/20';
@@ -156,19 +434,19 @@ export default function OperatorPage() {
 
   return (
     <div className="flex flex-col md:flex-row h-screen w-screen bg-[#09090b] text-[#f4f4f5] overflow-hidden relative">
-      
+
       {/* Top panel/Map on mobile, Right panel on desktop */}
       <div className="flex-grow relative h-[40vh] md:h-full w-full order-1 md:order-2">
-        <Map 
-          deviceStates={deviceStates} 
-          selectedId={selectedId} 
-          onSelectDevice={setSelectedId} 
+        <Map
+          deviceStates={deviceStates}
+          selectedId={selectedId}
+          onSelectDevice={setSelectedId}
         />
       </div>
 
       {/* Bottom console on mobile, Left sidebar on desktop */}
       <div className="w-full h-[60vh] md:h-full md:w-[480px] border-t md:border-t-0 md:border-r border-zinc-900 bg-zinc-950/95 flex flex-col justify-between z-10 order-2 md:order-1 shadow-2xl">
-        
+
         {/* Tab Headers */}
         <div className="border-b border-zinc-900 bg-zinc-950/80 backdrop-blur-md">
           <div className="p-4 flex justify-between items-center">
@@ -180,31 +458,39 @@ export default function OperatorPage() {
           </div>
 
           <div className="flex px-4 pb-2 gap-2">
-            <button 
+            <button
               onClick={() => setActiveTab('fleet')}
               className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all cursor-pointer ${
                 activeTab === 'fleet' ? 'bg-zinc-900 text-white' : 'text-zinc-500 hover:text-zinc-300'
               }`}
             >
-              Wheelchairs ({deviceStates.length})
+              Fleet ({deviceStates.length})
             </button>
-            <button 
+            <button
               onClick={() => setActiveTab('alerts')}
               className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all cursor-pointer relative ${
                 activeTab === 'alerts' ? 'bg-zinc-900 text-white' : 'text-zinc-500 hover:text-zinc-300'
               }`}
             >
-              Safety Feed ({events.length})
+              Feed ({events.length})
               {events.length > 0 && (
                 <span className="absolute top-1.5 right-4 w-1.5 h-1.5 rounded-full bg-red-500 animate-ping" />
               )}
+            </button>
+            <button
+              onClick={() => setActiveTab('firmware')}
+              className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all cursor-pointer ${
+                activeTab === 'firmware' ? 'bg-zinc-900 text-white' : 'text-zinc-500 hover:text-zinc-300'
+              }`}
+            >
+              OTA
             </button>
           </div>
         </div>
 
         {/* Dynamic tab contents */}
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
-          
+
           {error && (
             <div className="bg-red-500/10 border border-red-500/20 text-red-400 p-4 rounded-xl text-xs leading-normal">
               <p className="font-bold flex items-center gap-1.5">
@@ -217,7 +503,7 @@ export default function OperatorPage() {
 
           <AnimatePresence mode="wait">
             {activeTab === 'fleet' ? (
-              <motion.div 
+              <motion.div
                 key="fleet-tab"
                 initial={{ opacity: 0, x: -10 }}
                 animate={{ opacity: 1, x: 0 }}
@@ -240,12 +526,16 @@ export default function OperatorPage() {
                     {deviceStates.map((d) => (
                       <div
                         key={d.wheelchair_id}
+                        role="button"
+                        tabIndex={0}
+                        aria-pressed={selectedId === d.wheelchair_id}
                         onClick={() => setSelectedId(d.wheelchair_id)}
+                        onKeyDown={(event) => handleDeviceRowKeyDown(event, d.wheelchair_id)}
                         className={`p-3.5 rounded-xl border cursor-pointer transition-all flex items-center justify-between ${
                           selectedId === d.wheelchair_id
                             ? 'border-blue-500/60 bg-blue-500/5'
                             : 'border-zinc-900 hover:border-zinc-800 bg-zinc-900/20'
-                        }`}
+                        } ${!d.online ? 'opacity-50 grayscale' : ''}`}
                       >
                         <div className="space-y-1">
                           <div className="flex items-center gap-2">
@@ -292,7 +582,12 @@ export default function OperatorPage() {
                         <h3 className="font-bold text-base flex items-center gap-2">
                           {selectedChair.wheelchair_id}
                         </h3>
-                        <p className="text-zinc-500 text-xs mt-0.5">Uptime: {selectedChair.ts.split('T')[1].slice(0, 8)}</p>
+                        <p className="text-zinc-500 text-xs mt-0.5">
+                          {selectedChair.uptime != null && selectedChair.uptime > 0 ? (
+                            <>Uptime: {formatUptime(selectedChair.uptime)} · </>
+                          ) : null}
+                          Last seen: {formatLastSeen(lastSeenS)}
+                        </p>
                       </div>
                       <span className={`px-2.5 py-0.5 rounded-full text-xs font-semibold ${
                         selectedChair.online ? 'bg-emerald-500/10 text-emerald-400' : 'bg-zinc-800 text-zinc-400'
@@ -301,7 +596,16 @@ export default function OperatorPage() {
                       </span>
                     </div>
 
-                    {/* Sensor Data Grid */}
+                    {!selectedChair.online && (
+                      <div className="bg-red-500/10 border border-red-500/20 text-red-400 text-xs px-3.5 py-2.5 rounded-xl flex items-center gap-2.5">
+                        <span className="w-2 h-2 rounded-full bg-red-500 animate-ping shrink-0" />
+                        <span className="font-semibold uppercase tracking-wider text-[10px]">Disconnected</span>
+                      </div>
+                    )}
+
+                    <div className={selectedChair.online ? "space-y-5" : "space-y-5 opacity-40 grayscale pointer-events-none transition-all"}>
+
+                      {/* Sensor Data Grid */}
                     <div className="grid grid-cols-2 gap-2.5 text-xs">
                       {/* Speed Indicator */}
                       <div className="bg-zinc-900/40 p-3 rounded-xl border border-zinc-900/60 flex flex-col justify-between min-h-[64px] hover:border-zinc-800 transition-all">
@@ -310,7 +614,7 @@ export default function OperatorPage() {
                           <Zap className="w-3.5 h-3.5 text-blue-400 animate-pulse" />
                         </div>
                         <div className="font-extrabold text-zinc-100 text-sm mt-1.5 flex items-baseline gap-0.5">
-                          {selectedChair.speed !== undefined ? selectedChair.speed.toFixed(1) : '0.0'}
+                          {selectedChair.speed != null ? selectedChair.speed.toFixed(1) : '0.0'}
                           <span className="text-[9px] font-normal text-zinc-500">km/h</span>
                         </div>
                       </div>
@@ -323,21 +627,11 @@ export default function OperatorPage() {
                         </div>
                         <div className="font-extrabold text-zinc-100 text-sm mt-1.5 flex items-baseline gap-0.5">
                           {selectedChair.batt_pct}%
-                          <span className="text-[9px] font-normal text-zinc-500">({selectedChair.batt_v.toFixed(1)}V)</span>
+                          <span className="text-[9px] font-normal text-zinc-500">({(selectedChair.batt_v ?? 0).toFixed(1)}V)</span>
                         </div>
                       </div>
 
-                      {/* Motor Temperature */}
-                      <div className="bg-zinc-900/40 p-3 rounded-xl border border-zinc-900/60 flex flex-col justify-between min-h-[64px] hover:border-zinc-800 transition-all">
-                        <div className="flex items-center justify-between text-zinc-500">
-                          <span className="text-[10px] uppercase font-bold tracking-wider">Motor Temp</span>
-                          <Thermometer className="w-3.5 h-3.5 text-orange-400" />
-                        </div>
-                        <div className="font-extrabold text-zinc-100 text-sm mt-1.5 flex items-baseline gap-0.5">
-                          {selectedChair.temp_motor.toFixed(1)}
-                          <span className="text-[9px] font-normal text-zinc-500">°C</span>
-                        </div>
-                      </div>
+
 
                       {/* Battery Temperature */}
                       <div className="bg-zinc-900/40 p-3 rounded-xl border border-zinc-900/60 flex flex-col justify-between min-h-[64px] hover:border-zinc-800 transition-all">
@@ -346,7 +640,7 @@ export default function OperatorPage() {
                           <Thermometer className="w-3.5 h-3.5 text-rose-400" />
                         </div>
                         <div className="font-extrabold text-zinc-100 text-sm mt-1.5 flex items-baseline gap-0.5">
-                          {selectedChair.temp_batt !== undefined && selectedChair.temp_batt !== null ? selectedChair.temp_batt.toFixed(1) : '25.0'}
+                          {selectedChair.temp_batt != null ? selectedChair.temp_batt.toFixed(1) : '—'}
                           <span className="text-[9px] font-normal text-zinc-500">°C</span>
                         </div>
                       </div>
@@ -358,23 +652,21 @@ export default function OperatorPage() {
                           <Sliders className="w-3.5 h-3.5 text-purple-400" />
                         </div>
                         <div className="font-extrabold text-zinc-100 text-sm mt-1.5">
-                          {selectedChair.tilt.toFixed(1)}°
+                          {selectedChair.tilt != null ? `${selectedChair.tilt.toFixed(1)}°` : '—'}
                         </div>
                       </div>
 
-                      {/* WiFi Link RSSI */}
+                      {/* Network Link RSSI */}
                       <div className="bg-zinc-900/40 p-3 rounded-xl border border-zinc-900/60 flex flex-col justify-between min-h-[64px] hover:border-zinc-800 transition-all">
                         <div className="flex items-center justify-between text-zinc-500">
-                          <span className="text-[10px] uppercase font-bold tracking-wider">WiFi Link</span>
+                          <span className="text-[10px] uppercase font-bold tracking-wider">Network Link</span>
                           <Radio className="w-3.5 h-3.5 text-blue-400" />
                         </div>
                         <div className="font-extrabold text-zinc-100 text-sm mt-1.5 flex items-baseline gap-0.5">
                           {selectedChair.rssi}
                           <span className="text-[9px] font-normal text-zinc-500">dBm</span>
                         </div>
-                      </div>
-
-                      {/* Geofence Status */}
+                                   {/* Geofence Status */}
                       <div className="bg-zinc-900/40 p-3 rounded-xl border border-zinc-900/60 flex flex-col justify-between min-h-[64px] hover:border-zinc-800 transition-all">
                         <div className="flex items-center justify-between text-zinc-500">
                           <span className="text-[10px] uppercase font-bold tracking-wider">Geofence</span>
@@ -384,7 +676,7 @@ export default function OperatorPage() {
                           {selectedChair.geofence?.on ? (selectedChair.geofence.in ? 'INSIDE' : 'OUTSIDE') : 'OFF'}
                         </div>
                       </div>
-                    </div>
+                    </div>            </div>
 
                     {/* Anti-Tamper Security (SW-520D tilt, armed while LOCKED) */}
                     {(() => {
@@ -463,33 +755,13 @@ export default function OperatorPage() {
                       );
                     })()}
 
-                    {/* Ambient Climate (DHT22) */}
-                    <ClimateCard tempC={selectedChair.temp_amb} humidity={selectedChair.humidity} />
+
 
                     {/* Actuation Command buttons */}
                     <div className="space-y-3 border-t border-zinc-900 pt-4">
                       <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-wider">Actuate Device</h4>
-                      
-                      <div className="grid grid-cols-2 gap-2">
-                        <button
-                          onClick={() => triggerCommand(displayPower ? 'POWER_OFF' : 'POWER_ON')}
-                          disabled={actionLoading}
-                          className={`flex items-center justify-center gap-1.5 py-2.5 text-xs font-bold rounded-lg border transition-all cursor-pointer ${
-                            displayPower
-                              ? 'border-red-500/20 bg-red-500/10 text-red-400 hover:bg-red-500/20'
-                              : 'border-emerald-500/20 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20'
-                          }`}
-                        >
-                          {isPowerPending ? (
-                            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                          ) : displayPower ? (
-                            <Square className="w-3.5 h-3.5" />
-                          ) : (
-                            <Play className="w-3.5 h-3.5" />
-                          )}
-                          Power {displayPower ? 'OFF' : 'ON'}
-                        </button>
 
+                      <div className="grid grid-cols-1">
                         <button
                           onClick={() => triggerCommand(displayLocked ? 'UNLOCK' : 'LOCK')}
                           disabled={actionLoading}
@@ -500,11 +772,20 @@ export default function OperatorPage() {
                           }`}
                         >
                           {isLockedPending ? (
-                            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                            <>
+                              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                              Pending...
+                            </>
                           ) : displayLocked ? (
-                            <Unlock className="w-3.5 h-3.5" />
+                            <>
+                              <Unlock className="w-3.5 h-3.5" />
+                              Unlock Motion
+                            </>
                           ) : (
-                            <Lock className="w-3.5 h-3.5" />
+                            <>
+                              <Lock className="w-3.5 h-3.5" />
+                              Lock Motion
+                            </>
                           )}
                         </button>
                       </div>
@@ -522,29 +803,7 @@ export default function OperatorPage() {
                         {selectedChair.session_state === 'SAFE_FAULT' ? 'Clear SOS Alarm' : 'Trigger Manual SOS'}
                       </button>
 
-                      {/* Speed limit slider */}
-                      <div className="space-y-1.5 bg-zinc-900/30 p-3 rounded-lg border border-zinc-900">
-                        <div className="flex justify-between items-center text-xs">
-                          <span className="text-zinc-500">Speed Limit</span>
-                          <span className="font-semibold text-zinc-300">{speedLimit} km/h</span>
-                        </div>
-                        <input
-                          type="range"
-                          min="2"
-                          max="12"
-                          step="1"
-                          value={speedLimit}
-                          onChange={(e) => setSpeedLimit(parseInt(e.target.value))}
-                          className="w-full h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-blue-500"
-                        />
-                        <button
-                          onClick={() => triggerCommand('SET_SPEED_LIMIT', { kmh: speedLimit })}
-                          disabled={actionLoading}
-                          className="w-full mt-2 py-1 text-[10px] font-bold bg-blue-600 hover:bg-blue-500 text-white rounded transition-all cursor-pointer"
-                        >
-                          Update Speed Limit
-                        </button>
-                      </div>
+
 
                       {/* Geofence adjust */}
                       <div className="space-y-3 bg-zinc-900/30 p-3 rounded-lg border border-zinc-900">
@@ -552,7 +811,7 @@ export default function OperatorPage() {
                           <span className="text-zinc-500 font-bold uppercase tracking-wider text-[10px]">Geofence settings</span>
                           <span className="font-semibold text-zinc-300 text-[10px] bg-zinc-800 px-1.5 py-0.5 rounded">{gfRadius} meters</span>
                         </div>
-                        
+
                         {/* Manual coordinates input */}
                         <div className="grid grid-cols-2 gap-2">
                           <div className="space-y-1">
@@ -599,10 +858,10 @@ export default function OperatorPage() {
                               alert("Please enter valid decimal coordinates for latitude and longitude.");
                               return;
                             }
-                            triggerCommand('SET_GEOFENCE', { 
-                              lat: latVal, 
-                              lng: lngVal, 
-                              radius: gfRadius 
+                            triggerCommand('SET_GEOFENCE', {
+                              lat: latVal,
+                              lng: lngVal,
+                              radius: gfRadius
                             });
                           }}
                           disabled={actionLoading}
@@ -611,13 +870,14 @@ export default function OperatorPage() {
                           Apply Custom Geofence
                         </button>
                       </div>
-
                     </div>
+                  </div>
+
                   </motion.div>
                 )}
               </motion.div>
-            ) : (
-              <motion.div 
+            ) : activeTab === 'alerts' ? (
+              <motion.div
                 key="alerts-tab"
                 initial={{ opacity: 0, x: 10 }}
                 animate={{ opacity: 1, x: 0 }}
@@ -630,12 +890,12 @@ export default function OperatorPage() {
                   </div>
                 ) : (
                   events.map((ev) => (
-                    <div 
+                    <div
                       key={ev.id}
                       className="p-3 bg-zinc-900/40 border border-zinc-900 rounded-xl flex gap-3 items-start"
                     >
                       <div className={`p-1.5 rounded-lg flex-shrink-0 ${
-                        ['FALL', 'OVERTEMP', 'TAMPER'].includes(ev.type) ? 'text-red-400 bg-red-500/10' : 'text-amber-400 bg-amber-500/10'
+                        ['FALL', 'OVERTEMP', 'TAMPER', 'OTA_FAIL', 'UNLOCK_FAILED'].includes(ev.type) ? 'text-red-400 bg-red-500/10' : 'text-amber-400 bg-amber-500/10'
                       }`}>
                         <AlertTriangle className="w-4 h-4" />
                       </div>
@@ -658,12 +918,210 @@ export default function OperatorPage() {
                               GEOFENCE_ENTER: 'Returned Inside Geofence',
                               TILT_WARN: 'High Tilt Angle Warning',
                               SOS: 'Manual Emergency SOS',
+                              SESSION_END_OFFLINE: 'Session Expired While Device OFFLINE — Verify Chair!',
+                              UNLOCK_FAILED: 'Paid Rental: Device REFUSED Unlock',
+                              OTA_STARTED: 'OTA Firmware Download Initiated',
+                              OTA_READY: 'OTA Write Completed, Rebooting',
+                              OTA_SUCCESS: 'Firmware Upgraded & Validated',
+                              OTA_FAIL: 'Firmware Flash/Download Failed',
+                              OTA_DEFERRED: 'OTA Update Deferral Pending',
+                              OTA_ROLLED_BACK: 'Firmware Rollback Recovered'
                             } as Record<string, string>)[ev.type] || 'Status Alert'}
                           </span>
                         </div>
                       </div>
                     </div>
                   ))
+                )}
+              </motion.div>
+            ) : (
+              <motion.div
+                key="firmware-tab"
+                initial={{ opacity: 0, x: 10 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: 10 }}
+                className="space-y-4 text-xs"
+              >
+                {/* Upload Section */}
+                <div className="bg-zinc-900/30 p-4 rounded-xl border border-zinc-900 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="font-extrabold uppercase text-[10px] text-zinc-400 tracking-wider">Register Release (.bin)</span>
+                    {uploading && <span className="text-blue-400 font-bold text-[9px] animate-pulse">Uploading...</span>}
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="space-y-1">
+                      <label className="text-[9px] uppercase font-bold text-zinc-500">Release Version</label>
+                      <input
+                        type="text"
+                        value={fwVersionInput}
+                        onChange={(e) => setFwVersionInput(e.target.value)}
+                        placeholder="e.g. 0.2.0"
+                        className="w-full bg-zinc-900 border border-zinc-800 p-2 rounded text-zinc-200 focus:outline-none focus:border-blue-500 font-mono"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[9px] uppercase font-bold text-zinc-500">Upload Binary</label>
+                      <input
+                        type="file"
+                        accept=".bin"
+                        onChange={handleFwUpload}
+                        disabled={uploading}
+                        className="w-full text-[10px] text-zinc-400 file:mr-2 file:py-1.5 file:px-2 file:rounded file:border-0 file:text-[9px] file:font-bold file:bg-zinc-800 file:text-zinc-200 hover:file:bg-zinc-700 file:cursor-pointer"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[9px] uppercase font-bold text-zinc-500">Release Notes / Changelog</label>
+                    <textarea
+                      value={fwNotesInput}
+                      onChange={(e) => setFwNotesInput(e.target.value)}
+                      placeholder="Dev updates notes..."
+                      rows={2}
+                      className="w-full bg-zinc-900 border border-zinc-800 p-2 rounded text-zinc-200 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                </div>
+
+                {/* OTA Push Section */}
+                <div className="bg-zinc-900/30 p-4 rounded-xl border border-zinc-900 space-y-3">
+                  <span className="font-extrabold uppercase text-[10px] text-zinc-400 tracking-wider block">Trigger Firmware OTA</span>
+
+                  {releases.length === 0 ? (
+                    <div className="text-zinc-500 text-center py-2 border border-dashed border-zinc-800 rounded-lg">
+                      No firmware releases registered.
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      <div className="space-y-1">
+                        <label className="text-[9px] uppercase font-bold text-zinc-500">Select Release</label>
+                        <div className="space-y-1.5">
+                          {releases.map((r) => (
+                            <div
+                              key={r.id}
+                              onClick={() => setSelectedReleaseId(r.id.toString())}
+                              className={`flex items-center justify-between p-2.5 rounded-lg border cursor-pointer transition-all group ${
+                                selectedReleaseId === r.id.toString()
+                                  ? 'bg-blue-600/10 border-blue-500/40 text-blue-300'
+                                  : 'bg-zinc-900 border-zinc-800 text-zinc-300 hover:border-zinc-700'
+                              }`}
+                            >
+                              <div className="flex items-center gap-2 font-mono text-xs">
+                                <div className={`w-2 h-2 rounded-full ${selectedReleaseId === r.id.toString() ? 'bg-blue-500' : 'bg-zinc-700'}`} />
+                                v{r.version}
+                                <span className="text-zinc-600 text-[10px]">({(r.size / 1024 / 1024).toFixed(2)} MB)</span>
+                              </div>
+                              <button
+                                onClick={(e) => { e.stopPropagation(); handleDeleteRelease(r.id.toString(), r.version); }}
+                                disabled={actionLoading}
+                                className="p-1.5 rounded hover:bg-red-500/20 text-zinc-500 hover:text-red-400 transition-all"
+                                title={`Delete v${r.version}`}
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Staged Rollout Protection */}
+                      <div className="bg-zinc-950 p-3 rounded-lg border border-zinc-900 space-y-2">
+                        <div className="flex items-start gap-2">
+                          <input
+                            type="checkbox"
+                            id="fleetwide"
+                            checked={otaRolloutFleetWide}
+                            onChange={(e) => setOtaRolloutFleetWide(e.target.checked)}
+                            className="mt-0.5 cursor-pointer accent-blue-500"
+                          />
+                          <div className="space-y-0.5">
+                            <label htmlFor="fleetwide" className="font-bold text-zinc-300 cursor-pointer text-[10px]">
+                              Stage 1 Rollout (Fleet-wide limit: 2 chairs)
+                            </label>
+                            <p className="text-[9px] text-zinc-500 leading-normal">
+                              Warning: Updates are pushed to 1 target device by default. Checking this stages a safe canary release to a maximum of 2 devices.
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+
+                      <button
+                        onClick={handlePushOTA}
+                        disabled={actionLoading || !selectedId}
+                        className="w-full py-2.5 bg-blue-600 hover:bg-blue-500 disabled:bg-zinc-800 disabled:text-zinc-600 text-white rounded font-bold transition-all uppercase tracking-wider text-[10px] cursor-pointer"
+                      >
+                        {!selectedId
+                          ? "Select device first"
+                          : otaRolloutFleetWide
+                            ? "Push Staged Rollout (Max 2 Devices)"
+                            : `Push OTA to ${selectedId}`}
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Selected Chair Live OTA Telemetry Status */}
+                {selectedChair && (
+                  <div className="bg-zinc-900/30 p-4 rounded-xl border border-zinc-900 space-y-2.5">
+                    <div className="flex items-center justify-between border-b border-zinc-900 pb-1.5">
+                      <span className="font-extrabold uppercase text-[10px] text-zinc-400 tracking-wider">Live OTA Status: {selectedChair.wheelchair_id}</span>
+                      <span className={`px-1.5 py-0.5 rounded text-[9px] font-extrabold tracking-wider uppercase ${
+                        selectedChair.ota_status === 'downloading' ? 'bg-blue-500/10 text-blue-400 animate-pulse' :
+                        selectedChair.ota_status === 'deferred' ? 'bg-amber-500/10 text-amber-400' :
+                        selectedChair.ota_status === 'failed' ? 'bg-red-500/10 text-red-400' :
+                        selectedChair.ota_status === 'rebooting' ? 'bg-indigo-500/10 text-indigo-400 animate-pulse' :
+                        'bg-zinc-800 text-zinc-400'
+                      }`}>
+                        {selectedChair.ota_status || 'idle'}
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3 text-[10px]">
+                      <div>
+                        <span className="text-zinc-500 block font-bold uppercase tracking-wider text-[9px]">Active Version</span>
+                        <span className="font-mono text-zinc-200 font-bold">v{selectedChair.fw_version || '0.1.0'}</span>
+                      </div>
+                      <div>
+                        <span className="text-zinc-500 block font-bold uppercase tracking-wider text-[9px]">Target Version</span>
+                        <span className="font-mono text-zinc-200 font-bold">
+                          {selectedChair.target_version ? `v${selectedChair.target_version}` : 'None'}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Progress Bar */}
+                    {selectedChair.ota_status === 'downloading' && (
+                      <div className="space-y-1">
+                        <div className="flex justify-between text-[9px] text-zinc-400 font-bold">
+                          <span>Downloading stream to partition...</span>
+                          <span>{selectedChair.ota_progress || 0}%</span>
+                        </div>
+                        <div className="w-full bg-zinc-900 h-2 rounded-full overflow-hidden border border-zinc-800/80">
+                          <div
+                            className="bg-blue-500 h-full transition-all duration-300"
+                            style={{ width: `${selectedChair.ota_progress || 0}%` }}
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Error display */}
+                    {selectedChair.ota_last_error && (
+                      <div className="bg-red-500/10 border border-red-500/20 text-red-400 p-2.5 rounded-lg flex items-start gap-1.5 text-[9px] leading-normal font-mono">
+                        <AlertTriangle className="w-3.5 h-3.5 text-red-500 flex-shrink-0 mt-0.5" />
+                        <div>
+                          <span className="font-bold">Last Error:</span> {selectedChair.ota_last_error}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {otaError && (
+                  <div className="bg-red-500/10 border border-red-500/20 text-red-400 p-3 rounded-lg text-[9px] font-mono">
+                    {otaError}
+                  </div>
                 )}
               </motion.div>
             )}
@@ -680,8 +1138,12 @@ export default function OperatorPage() {
 
       </div>
 
-      {/* Emergency Alert HUD Overlay (Fall/Tilt/SOS) */}
-      {selectedChair && (selectedChair.session_state === 'SAFE_FAULT' || selectedChair.tilt > 50) && (
+      {/* Emergency Alert HUD Overlay (Fall/Tilt/SOS/Overtemp) */}
+      {selectedChair && (
+        selectedChair.session_state === 'SAFE_FAULT' || 
+        (selectedChair.tilt != null && selectedChair.tilt > 50) ||
+        (selectedChair.temp_batt != null && selectedChair.temp_batt > 55.0)
+      ) && (
         <div className="fixed inset-0 bg-[#09090b]/85 backdrop-blur-md z-[9999] flex items-center justify-center p-4">
           <div className="bg-zinc-950 border border-red-500/30 p-6 rounded-2xl max-w-sm w-full space-y-4 shadow-2xl text-center">
             <div className="w-16 h-16 rounded-full bg-red-500/10 border border-red-500/20 flex items-center justify-center mx-auto text-red-500 animate-pulse">
@@ -690,12 +1152,27 @@ export default function OperatorPage() {
             <div className="space-y-1">
               <h2 className="text-lg font-black text-red-500 uppercase tracking-wider">Emergency Alarm Active</h2>
               <p className="text-zinc-400 text-xs font-semibold">
-                {selectedChair.tilt > 50 ? "Automatic Tilt/Fall Detected!" : "Manual Emergency SOS Triggered!"}
+                {selectedChair.temp_batt != null && selectedChair.temp_batt > 55.0
+                  ? `CRITICAL BATTERY OVERTEMP: ${selectedChair.temp_batt.toFixed(1)}°C (Limit: 55°C)!`
+                  : selectedChair.tilt > 50
+                  ? "Automatic Tilt/Fall Detected!"
+                  : "Manual Emergency SOS Triggered!"}
               </p>
             </div>
-            <div className="bg-zinc-900 p-3 rounded-lg border border-zinc-800 text-xs font-mono text-zinc-300">
-              <div className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider mb-1">Broadcasting Live Location</div>
-              Coordinates: {selectedChair.lat.toFixed(6)}, {selectedChair.lng.toFixed(6)}
+            <div className="bg-zinc-900 p-3 rounded-lg border border-zinc-800 text-xs font-mono text-zinc-300 space-y-1.5 text-left">
+              <div className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider mb-0.5 text-center">Broadcasting Live Location</div>
+              <div>Coordinates: {(selectedChair.lat ?? 0).toFixed(6)}, {(selectedChair.lng ?? 0).toFixed(6)}</div>
+              <div className="pt-1 text-center">
+                <a 
+                  href={`https://www.google.com/maps/search/?api=1&query=${selectedChair.lat},${selectedChair.lng}`} 
+                  target="_blank" 
+                  rel="noopener noreferrer" 
+                  className="inline-flex items-center gap-1.5 px-3 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 font-bold rounded border border-zinc-700 text-[10px] uppercase transition-all cursor-pointer"
+                >
+                  <MapPin className="w-3 h-3 text-pink-400" />
+                  Open in Google Maps
+                </a>
+              </div>
             </div>
             <p className="text-[10px] text-zinc-500 leading-normal">
               📡 Sending live coordinates to nearest emergency rescue dispatchers (Trauma & EMS services).
@@ -725,7 +1202,7 @@ export default function OperatorPage() {
             </div>
             <div className="bg-zinc-900 p-3 rounded-lg border border-zinc-800 text-xs font-mono text-zinc-300">
               <div className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider mb-1">Continuous Siren Active</div>
-              {selectedChair.tamper_count} disturbance{selectedChair.tamper_count === 1 ? '' : 's'} · {selectedChair.lat.toFixed(6)}, {selectedChair.lng.toFixed(6)}
+              {selectedChair.tamper_count} disturbance{selectedChair.tamper_count === 1 ? '' : 's'} · {(selectedChair.lat ?? 0).toFixed(6)}, {(selectedChair.lng ?? 0).toFixed(6)}
             </div>
             <p className="text-[10px] text-zinc-500 leading-normal">
               🔒 The tilt sensor detected repeated movement of the parked, locked wheelchair.

@@ -33,7 +33,7 @@ export default function LandingPage() {
       </header>
 
       {/* Main Section */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-6 flex flex-col lg:flex-row items-center justify-center gap-12 z-10 py-12">
+      <main className="flex-1 max-w-7xl w-full mx-auto px-6 flex flex-col lg:flex-row items-center justify-center gap-y-6 lg:gap-x-12 z-10 py-6 md:py-8">
         
         {/* Left Copy */}
         <div className="flex-1 flex flex-col items-start text-left max-w-xl">
@@ -41,7 +41,7 @@ export default function LandingPage() {
             initial={{ opacity: 0, y: 15 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.5 }}
-            className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-blue-500/10 border border-blue-500/20 text-blue-400 text-xs font-semibold mb-6"
+            className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-blue-500/10 border border-blue-500/20 text-blue-400 text-xs font-semibold mb-4"
           >
             <Activity className="w-3.5 h-3.5 animate-pulse" />
             Next-Gen IoT Mobility
@@ -63,30 +63,51 @@ export default function LandingPage() {
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.6, delay: 0.2 }}
-            className="text-zinc-400 mt-6 text-base md:text-lg leading-relaxed"
+            className="text-zinc-400 mt-4 text-base md:text-lg leading-relaxed"
           >
-            Experience the world's most advanced smart wheelchair rental network. Premium comfort, micro-second GPS geofencing, multi-sensor safety overlays, and secure cloud actuation.
+            Experience the world's most advanced smart wheelchair rental network. Premium comfort, real-time GPS geofencing, multi-sensor safety overlays, and secure cloud actuation.
           </motion.p>
 
           <motion.div 
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.6, delay: 0.3 }}
-            className="flex flex-col sm:flex-row gap-4 mt-10 w-full sm:w-auto"
+            className="flex flex-col sm:flex-row gap-4 mt-8 w-full sm:w-auto"
           >
             <Link 
               href="/rider" 
-              className="flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-500 text-white font-semibold px-6 py-3.5 rounded-xl shadow-lg shadow-blue-500/20 hover:shadow-blue-500/30 transition-all group"
+              className="flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-500 text-white font-semibold px-6 py-3 rounded-xl shadow-lg shadow-blue-500/20 hover:shadow-blue-500/30 transition-all group text-sm"
             >
               Rent a Wheelchair
               <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
             </Link>
             <Link 
               href="/operator" 
-              className="flex items-center justify-center gap-2 glass hover:bg-zinc-800/80 font-semibold px-6 py-3.5 rounded-xl transition-all"
+              className="flex items-center justify-center gap-2 glass hover:bg-zinc-800/80 font-semibold px-6 py-3 rounded-xl transition-all text-sm"
             >
               Monitor Fleet
             </Link>
+          </motion.div>
+
+          {/* Trust Badges */}
+          <motion.div
+            initial={{ opacity: 0, y: 15 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.6, delay: 0.4 }}
+            className="flex flex-wrap gap-x-4 gap-y-2 mt-8 text-[10px] font-bold text-zinc-500 uppercase tracking-widest"
+          >
+            <span className="flex items-center gap-1.5 border border-zinc-900 bg-zinc-950/40 px-3 py-1.5 rounded-full">
+              <Shield className="w-3.5 h-3.5 text-blue-400" />
+              IP67 Weatherproof
+            </span>
+            <span className="flex items-center gap-1.5 border border-zinc-900 bg-zinc-950/40 px-3 py-1.5 rounded-full">
+              <Activity className="w-3.5 h-3.5 text-emerald-400" />
+              24/7 Monitoring
+            </span>
+            <span className="flex items-center gap-1.5 border border-zinc-900 bg-zinc-950/40 px-3 py-1.5 rounded-full">
+              <Zap className="w-3.5 h-3.5 text-purple-400" />
+              Fleet-Ready
+            </span>
           </motion.div>
         </div>
 
@@ -101,8 +122,8 @@ export default function LandingPage() {
                 <Compass className="w-5 h-5" />
               </div>
               <div>
-                <h3 className="font-semibold text-lg">Live GPS & Geofence</h3>
-                <p className="text-zinc-400 text-xs mt-1">Precise path tracking with sub-meter circular boundaries.</p>
+                <h3 className="font-semibold text-lg text-zinc-100">Live GPS & Geofencing</h3>
+                <p className="text-zinc-400 text-xs mt-1 leading-relaxed">Real-time location tracking with zone-based theft alerts.</p>
               </div>
             </motion.div>
 
@@ -114,8 +135,8 @@ export default function LandingPage() {
                 <Shield className="w-5 h-5" />
               </div>
               <div>
-                <h3 className="font-semibold text-lg">Safety Override</h3>
-                <p className="text-zinc-400 text-xs mt-1">Immediate gyro tip-over and motor temperature cutoffs.</p>
+                <h3 className="font-semibold text-lg text-zinc-100">Fall & Tilt Detection</h3>
+                <p className="text-zinc-400 text-xs mt-1 leading-relaxed">Multi-sensor motion monitoring detects tip-overs and impacts instantly.</p>
               </div>
             </motion.div>
           </div>
@@ -129,19 +150,23 @@ export default function LandingPage() {
                 <Zap className="w-5 h-5" />
               </div>
               <div>
-                <h3 className="font-semibold text-lg">Instant Unlock</h3>
-                <p className="text-zinc-400 text-xs mt-1">Scan QR, verify payment on Vercel, and unlock in &lt; 3s.</p>
+                <h3 className="font-semibold text-lg text-zinc-100">Instant Unlock</h3>
+                <p className="text-zinc-400 text-xs mt-1 leading-relaxed">Scan, verify payment, and unlock in under 3 seconds.</p>
               </div>
             </motion.div>
 
-            <div className="glass-card p-6 flex flex-col justify-center items-center text-center border-dashed border-zinc-800">
-              <span className="text-3xl font-extrabold text-blue-500">60fps</span>
-              <span className="text-zinc-400 text-xs uppercase font-semibold mt-1 tracking-wider">Smooth Maps</span>
-              <div className="flex gap-1 mt-3">
-                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping" />
-                <span className="w-2 h-2 rounded-full bg-emerald-500 absolute" />
+            <motion.div 
+              whileHover={{ y: -4 }}
+              className="glass-card p-6 flex flex-col justify-between min-h-[160px]"
+            >
+              <div className="w-10 h-10 rounded-lg bg-blue-500/10 flex items-center justify-center text-blue-400">
+                <Activity className="w-5 h-5 animate-pulse" />
               </div>
-            </div>
+              <div>
+                <h3 className="font-semibold text-lg text-zinc-100">24/7 Fleet Monitoring</h3>
+                <p className="text-zinc-400 text-xs mt-1 leading-relaxed">Live status, battery, and location across your entire fleet.</p>
+              </div>
+            </motion.div>
           </div>
         </div>
 

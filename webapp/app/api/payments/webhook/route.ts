@@ -23,103 +23,29 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Missing mandatory fields' }, { status: 400 });
     }
 
-    // 2. Fetch the corresponding rental details
-    const { data: rental, error: rentalError } = await supabase
-      .from('rentals')
-      .select('*')
-      .eq('id', rental_id)
-      .single();
+    // 2. Atomic payment → activation → command enqueue via a single Postgres
+    // transaction (activate_rental_tx in cloud/schema.sql). Either the payment
+    // insert, rental activation, AND the UNLOCK/SET_SPEED_LIMIT/SET_GEOFENCE
+    // enqueue ALL commit, or none do — a crash mid-webhook can no longer strand
+    // a paid rider on a locked chair. The function's idempotency guard also
+    // repairs rentals that are 'active' but missing their UNLOCK command.
+    const { data: txResult, error: txError } = await supabase.rpc('activate_rental_tx', {
+      p_rental_id: rental_id,
+      p_amount: amount,
+      p_provider: provider,
+      p_provider_ref: provider_ref
+    });
 
-    if (rentalError || !rental) {
-      console.error(`Rental ${rental_id} not found.`, rentalError);
-      return NextResponse.json({ error: 'Associated rental booking not found' }, { status: 404 });
+    if (txError) throw txError;
+
+    if (!txResult?.ok) {
+      const status = txResult?.error === 'rental_not_found' ? 404 : 409;
+      console.error(`Rental activation rejected for ${rental_id}:`, txResult);
+      return NextResponse.json({ error: txResult?.error || 'Activation failed' }, { status });
     }
 
-    // If already active or finished, return early
-    if (rental.state === 'active') {
-      return NextResponse.json({ ok: true, message: 'Rental already active' });
-    }
-
-    // 3. Create the payment record (Enforces idempotency on provider_ref)
-    const { error: paymentError } = await supabase
-      .from('payments')
-      .insert({
-        rental_id: rental_id,
-        amount: amount,
-        currency: 'PKR',
-        provider: provider,
-        provider_ref: provider_ref,
-        status: 'PAID',
-        paid_at: new Date().toISOString()
-      });
-
-    if (paymentError) {
-      // If error is unique constraint violation, it means webhook already processed successfully
-      if (paymentError.code === '23505') {
-        return NextResponse.json({ ok: true, message: 'Webhook already processed (idempotent)' });
-      }
-      throw paymentError;
-    }
-
-    // 4. Update the rental state to ACTIVE
-    const startAt = new Date();
-    const endAt = new Date(startAt.getTime() + rental.duration_s * 1000);
-
-    const { error: updateRentalError } = await supabase
-      .from('rentals')
-      .update({
-        state: 'active',
-        start_at: startAt.toISOString(),
-        end_at: endAt.toISOString()
-      })
-      .eq('id', rental_id);
-
-    if (updateRentalError) throw updateRentalError;
-
-    // 5. Query latest position of the wheelchair to center geofence
-    const { data: deviceState } = await supabase
-      .from('device_state')
-      .select('lat, lng')
-      .eq('wheelchair_id', rental.wheelchair_id)
-      .single();
-
-    const currentLat = deviceState?.lat || 24.860731;
-    const currentLng = deviceState?.lng || 67.001142;
-
-    // 6. Insert Commands in the queue: UNLOCK + SET_SPEED_LIMIT + SET_GEOFENCE
-    // Note: Device polls this commands table
-    const commandsToInsert = [
-      {
-        wheelchair_id: rental.wheelchair_id,
-        cmd: 'UNLOCK',
-        args: { duration_s: rental.duration_s },
-        status: 'pending',
-        req_id: `unlock-${Date.now()}`
-      },
-      {
-        wheelchair_id: rental.wheelchair_id,
-        cmd: 'SET_SPEED_LIMIT',
-        args: { kmh: rental.speed_limit || 6 },
-        status: 'pending',
-        req_id: `speed-${Date.now()}`
-      },
-      {
-        wheelchair_id: rental.wheelchair_id,
-        cmd: 'SET_GEOFENCE',
-        args: { lat: currentLat, lng: currentLng, radius: 300 },
-        status: 'pending',
-        req_id: `geofence-${Date.now()}`
-      }
-    ];
-
-    const { error: commandsError } = await supabase
-      .from('commands')
-      .insert(commandsToInsert);
-
-    if (commandsError) throw commandsError;
-
-    console.log(`Successfully unlocked wheelchair ${rental.wheelchair_id} for rental session ${rental_id}`);
-    return NextResponse.json({ ok: true, unlocked: true });
+    console.log(`Rental ${rental_id} activated atomically (${txResult.message || 'unlocked'}).`);
+    return NextResponse.json({ ok: true, unlocked: true, message: txResult.message });
 
   } catch (err: any) {
     console.error("Webhook processing error:", err);

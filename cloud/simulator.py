@@ -29,7 +29,6 @@ print("  Interactive commands available:")
 print("    temp <c>     - Set motor temperature")
 print("    tilt <deg>   - Set tilt angle")
 print("    tamp         - Tamper/shake a LOCKED chair (SW-520D); 4th = siren")
-print("    occupy <1/0> - Set seat occupancy status")
 print("    speed <kmh>  - Set speed limit override")
 print("    gf <1/0>     - Toggle geofence inside/outside")
 print("    clear        - Reset all sensors to normal")
@@ -39,12 +38,11 @@ print("=================================================")
 sim_temp_motor = 38.5
 sim_tilt = 1.0
 sim_tamper_hit = False   # one-shot: a tamper disturbance (shake) just happened
-sim_occupied = True
 sim_speed = 4.0
 sim_gf_inside_mock = True
 
 def stdin_thread():
-    global sim_temp_motor, sim_tilt, sim_tamper_hit, sim_occupied, sim_speed, sim_gf_inside_mock
+    global sim_temp_motor, sim_tilt, sim_tamper_hit, sim_speed, sim_gf_inside_mock
     while True:
         try:
             line = sys.stdin.readline().strip()
@@ -63,9 +61,6 @@ def stdin_thread():
             elif cmd == "tamp":
                 sim_tamper_hit = True
                 print("[Sim Input] Tamper disturbance (only counts while LOCKED)")
-            elif cmd == "occupy" and len(parts) > 1:
-                sim_occupied = int(parts[1]) == 1
-                print(f"[Sim Input] Set seat occupancy to {sim_occupied}")
             elif cmd == "speed" and len(parts) > 1:
                 sim_speed = float(parts[1])
                 print(f"[Sim Input] Set speed to {sim_speed} km/h")
@@ -76,12 +71,11 @@ def stdin_thread():
                 sim_temp_motor = 38.5
                 sim_tilt = 1.0
                 sim_tamper_hit = False
-                sim_occupied = True
                 sim_speed = 4.0
                 sim_gf_inside_mock = True
                 print("[Sim Input] Reset all sensors to normal states.")
             else:
-                print("[Sim Input] Unknown command. Use: temp <val>, tilt <val>, tamp, occupy <1/0>, speed <val>, gf <1/0>, clear")
+                print("[Sim Input] Unknown command. Use: temp <val>, tilt <val>, tamp, speed <val>, gf <val>, clear")
         except Exception as e:
             print(f"Error reading input: {e}")
 
@@ -119,6 +113,20 @@ tamper_event_reported = False
 
 def calculate_hmac(payload: str, key: str) -> str:
     return hmac.new(key.encode('utf-8'), payload.encode('utf-8'), hashlib.sha256).hexdigest()
+
+def check_fall_latch():
+    """FALL interlock sampling. Called every 500ms (twice per main-loop second)
+    so the latch window is time-equivalent to the firmware's 500ms sustained
+    breach debounce (actuators.cpp: 20Hz x 10 ticks). The old 1Hz check could
+    take up to a full second — 2x the hardware window — hiding regressions."""
+    global fall_breach_ticks, fall_latched
+    if sim_tilt > 50.0:
+        fall_breach_ticks += 1
+        if fall_breach_ticks >= 1 and not fall_latched:  # 1 x 500ms sample = 500ms
+            fall_latched = True
+            print(f"[Safety] FALL Breached! Tilt: {sim_tilt}°")
+    else:
+        fall_breach_ticks = 0
 
 def report_safety_event(event_type: str, detail_dict: dict):
     event_payload = {
@@ -165,6 +173,7 @@ def poll_and_execute_commands():
         res = requests.get(poll_url, headers=headers, timeout=3)
         if res.status_code == 200:
             commands = res.json()
+            commands.sort(key=lambda item: 0 if item.get("cmd") == "UNLOCK" else 1 if item.get("cmd") in ("SET_SPEED_LIMIT", "SET_GEOFENCE") else 2)
             for cmd_obj in commands:
                 cmd_id = cmd_obj.get("id")
                 cmd = cmd_obj.get("cmd")
@@ -178,6 +187,8 @@ def poll_and_execute_commands():
                 is_safe_fault = (sim_session_state == "SAFE_FAULT")
                 
                 ok = False
+                session_start_ts = None
+                session_end_ts = None
                 if cmd == "POWER_ON":
                     if is_safe_fault and hazard_active:
                         print("[Command] Rejected POWER_ON: Safety hazard is still active!")
@@ -204,6 +215,7 @@ def poll_and_execute_commands():
                         sim_locked = 0
                         sim_session_state = "ACTIVE"
                         sim_time_left = args.get("duration_s", 1200)
+                        session_start_ts = int(time.time())
                         ok = True
                 elif cmd == "WARN_EXPIRY":
                     if sim_session_state == "ACTIVE":
@@ -215,6 +227,7 @@ def poll_and_execute_commands():
                         sim_session_state = "ENDING"
                         sim_time_left = 0
                         sim_ending_ticks = 0
+                        session_end_ts = int(time.time())
                     ok = True
                 elif cmd == "CLEAR_TAMPER":
                     tamper_alarm_latched = False
@@ -223,11 +236,19 @@ def poll_and_execute_commands():
                     print("[Tamper] Cleared by operator/rider. Re-armed.")
                     ok = True
                 elif cmd == "SET_SPEED_LIMIT":
-                    sim_speed_limit = args.get("kmh", 6)
-                    ok = True
+                    if sim_session_state not in ("ACTIVE", "EXPIRING"):
+                        print("[Command] Rejected SET_SPEED_LIMIT: no active device session.")
+                        ok = False
+                    else:
+                        sim_speed_limit = args.get("kmh", 6)
+                        ok = True
                 elif cmd == "SET_GEOFENCE":
-                    sim_geofence_r = args.get("radius", 300)
-                    ok = True
+                    if sim_session_state not in ("ACTIVE", "EXPIRING"):
+                        print("[Command] Rejected SET_GEOFENCE: no active device session.")
+                        ok = False
+                    else:
+                        sim_geofence_r = args.get("radius", 300)
+                        ok = True
                 elif cmd == "PING":
                     ok = True
                 
@@ -243,6 +264,10 @@ def poll_and_execute_commands():
                         "session_state": sim_session_state
                     }
                 }
+                if session_start_ts is not None:
+                    ack_payload["session_start_ts"] = session_start_ts
+                if session_end_ts is not None:
+                    ack_payload["session_end_ts"] = session_end_ts
                 
                 ack_str = json.dumps(ack_payload)
                 ack_sig = calculate_hmac(ack_str, DEVICE_KEY)
@@ -279,16 +304,9 @@ try:
                 overtemp_reported = False
                 print("[Safety] OVERTEMP Cleared. Hysteresis band reset.")
 
-        # 3. FALL Interlock (500ms = 1 consecutive tick check in 1Hz python loop)
-        fall_breached = (sim_tilt > 50.0)
-        if fall_breached:
-            fall_breach_ticks += 1
-            if fall_breach_ticks >= 1: # Python loop runs at 1Hz, so 1 tick = 1s (>500ms)
-                if not fall_latched:
-                    fall_latched = True
-                    print(f"[Safety] FALL Breached! Tilt: {sim_tilt}°")
-        else:
-            fall_breach_ticks = 0
+        # 3. FALL Interlock — sampled at 500ms cadence (here + mid-sleep below)
+        # to match the firmware's 500ms sustained-breach window (M1).
+        check_fall_latch()
 
         if fall_latched and sim_tilt < 30.0:
             if sim_session_state in ("LOCKED", "ACTIVE"):
@@ -436,13 +454,14 @@ try:
             "pitch": 0.0,
             "roll": 0.0,
             "tilt": tilt_val,
+            "yaw": 180.0,
             "temp_motor": motor_t,
             "temp_batt": 33.8,
             "temp_amb": 25.0,
             "humidity": 63,
             "batt_v": 4.12,
             "batt_pct": 98,
-            "occupied": 1 if sim_occupied else 0,
+            "in_motion": 1 if (spd_val > 0.1) else 0,
             "tamper": 1 if tamper_alarm_latched else 0,
             "tamper_count": tamper_warn_count,
             "rssi": -55,
@@ -478,7 +497,11 @@ try:
             print(f"[{uptime:04d}s] Ingest connection error: {e}")
             
         uptime += 1
-        time.sleep(1)
+        # Split the 1s cycle so the FALL check samples at 500ms — time-equivalent
+        # to the firmware's 500ms sustained-breach debounce (M1).
+        time.sleep(0.5)
+        check_fall_latch()
+        time.sleep(0.5)
 
 except KeyboardInterrupt:
     print("\nSimulator stopped by user.")

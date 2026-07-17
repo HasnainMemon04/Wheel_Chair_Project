@@ -13,46 +13,65 @@ body signed with its per-device key (SECURITY.md). TLS is automatic.
 |------|--------|------|---------|
 | Ingest telemetry | POST | `/functions/v1/ingest` | 1 Hz state snapshot (body = telemetry JSON) |
 | Ingest event | POST | `/functions/v1/ingest` | discrete alert (body = event JSON) |
-| Poll commands | GET | `/functions/v1/commands?device={id}&status=pending` | fetch queued commands |
+| Poll commands (simulator only) | GET | `/functions/v1/commands?device={id}&status=pending` | fetch queued commands |
 | Ack command | POST | `/functions/v1/commands/ack` | report execution result |
 
 The `ingest` function routes on a `kind` field (`"telemetry"` or `"event"`), upserts
-`device_state`, appends a downsampled `telemetry_history` row, and/or inserts `events`.
+`device_state`, appends a gap-downsampled `telemetry_history` row (one row per ≥10s of
+device uptime), and/or inserts `events`.
+
+**How the firmware actually receives commands:** the device does **not** poll
+`GET /commands`. Pending commands are **piggybacked in the `POST /ingest` response**
+(`{ "ok": true, "commands": [...] }`) on every 1 Hz telemetry upload, and the device
+reports execution via `POST /commands/ack`. The `GET /commands` route (querystring-HMAC)
+is **retained solely for the Python simulator** (`cloud/simulator.py`), which polls
+instead of piggybacking. Decision: keep the GET path for the simulator's simpler loop.
+
+**Timestamps:** `ts` is the device's **real unix epoch from SNTP** (UTC, hourly re-sync).
+If the device has not completed an SNTP sync yet, it **omits `ts`** and the ingest
+function stamps the row server-side with `now()`. `up` (uptime seconds) is diagnostic
+context and is never used as a timestamp.
 
 ### Telemetry payload (POST /ingest, kind="telemetry")
 ```json
 {
   "kind": "telemetry",
-  "id": "WCHAIR-001", "ts": 1730000000, "fw": "1.2.0", "up": 4213,
+  "id": "WCHAIR-001", "ts": 1783843200, "fw": "1.2.0", "up": 4213,
   "fix": 1, "lat": 24.860731, "lng": 67.001142, "spd": 4.2, "sats": 9, "hdop": 1.1,
-  "pitch": 2.1, "roll": -1.4, "tilt": 2.5,
+  "pitch": 2.1, "roll": -1.4, "tilt": 2.5, "yaw": 180.0,
   "temp_motor": 41.3, "temp_batt": 33.8, "temp_amb": 31.0, "humidity": 64,
-  "batt_v": 3.91, "batt_pct": 78, "occupied": 1, "rssi": -61,
+  "batt_v": 3.91, "batt_pct": 78, "in_motion": 1, "rssi": -61,
+  "tamper": 0, "tamper_count": 0,
   "power": 1, "locked": 0, "session_state": "ACTIVE", "time_left": 540,
   "speed_limit": 6, "over_speed": 0,
+  "ota_status": "idle", "ota_progress": 0, "ota_last_error": null,
   "gf": { "on": 1, "in": 1, "dist": 84, "r": 300 }
 }
 ```
+`ts` may be **absent** when the device hasn't SNTP-synced yet (server stamps `now()`).
 
 ### Event payload (POST /ingest, kind="event")
 ```json
-{ "kind": "event", "id": "WCHAIR-001", "ts": 1730000050, "event": "FALL",
+{ "kind": "event", "id": "WCHAIR-001", "ts": 1783843250, "event": "FALL",
   "lat": 24.8607, "lng": 67.0011, "detail": { "tilt": 57 } }
 ```
 `event` ∈ `BOOT, GEOFENCE_EXIT, GEOFENCE_ENTER, OVERSPEED, OVERTEMP, TILT_WARN, FALL,
-TAMPER, EXPIRY_WARNING, SESSION_LOCKED, OTA_PROGRESS, OTA_DONE, OTA_FAIL`.
+TAMPER, EXPIRY_WARNING, SESSION_LOCKED, SESSION_END_OFFLINE, UNLOCK_FAILED,
+OTA_PROGRESS, OTA_DONE, OTA_FAIL`.
 
-### Command (GET /commands returns an array)
+### Command (ingest response or simulator GET returns an array)
 ```json
 [ { "id": "b1c2...", "cmd": "UNLOCK", "req_id": "c-9f3a", "args": {} } ]
 ```
 `cmd` ∈ `POWER_ON, POWER_OFF, LOCK, UNLOCK, SET_SPEED_LIMIT(args.kmh),
 SET_GEOFENCE(args.lat,lng,radius), START_SESSION(args.session_id,duration_s),
-END_SESSION, WARN_EXPIRY(args.seconds_left), OTA(args.url,version,sha256,sig), REBOOT, PING`.
+END_SESSION, WARN_EXPIRY(args.time_left), OTA(args.url,version,sha256,sig), REBOOT, PING`.
 
 ### Ack (POST /commands/ack)
 ```json
-{ "id": "b1c2...", "req_id": "c-9f3a", "ok": true, "state": "ACTIVE" }
+{ "id": "b1c2...", "req_id": "unlock-<rental_id>", "ok": true,
+  "session_start_ts": 1783843203,
+  "state": { "locked": false, "session_state": "ACTIVE", "speed_limit": 6 } }
 ```
 The function sets that `commands` row `status='acked'` (or `'failed'`), stores `ack`, `acked_at`.
 
@@ -115,5 +134,6 @@ erDiagram
 - **`device_state`** (one row/chair, upserted) is the live/hot table the UI subscribes to.
   It also holds the **desired** fields (`locked`, `speed_limit`, `geofence`) = the device shadow.
 - **`telemetry_history`** is append-only + downsampled + retained (PRODUCTION.md §2).
-- **`commands`** is the command queue (device polls; ack updates the row).
+- **`commands`** is the command queue (firmware receives pending rows via ingest response;
+  simulator can also poll; ack updates the row).
 - Keep `payments.provider_ref` unique for **idempotent** webhooks; never store raw card data.

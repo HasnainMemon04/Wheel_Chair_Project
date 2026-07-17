@@ -1,0 +1,122 @@
+(kicad_sch
+	(version 20260306)
+	(generator "eeschema")
+	(generator_version "10.0")
+	(uuid "76e39e4d-e544-4516-8ada-6f2987319d1a")
+	(paper "A4")
+	(title_block
+		(title "Wheelchair IoT Telematics Module")
+		(date "2025-07-14")
+		(rev "E")
+		(company "Root Sheet - Hierarchical Design")
+	)
+	(lib_symbols)
+	(text "Block 3-6 sheets will be added as design progresses."
+		(exclude_from_sim no)
+		(at 30 110 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+		(uuid "d8ed0564-dd5a-4317-af99-8729d86e7c02")
+	)
+	(sheet
+		(at 110 40)
+		(size 60 40)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(stroke
+			(width 0.1524)
+			(type solid)
+		)
+		(fill
+			(color 0 0 0 0)
+		)
+		(uuid "22d60448-0d29-4d96-8b5d-ceec838b0303")
+		(property "Sheetname" "Power Rails"
+			(at 110 39.2884 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left bottom)
+			)
+		)
+		(property "Sheetfile" "power_rails.kicad_sch"
+			(at 110 60 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left top)
+			)
+		)
+		(instances
+			(project "wheelchairpro"
+				(path "/76e39e4d-e544-4516-8ada-6f2987319d1a"
+					(page "3")
+				)
+			)
+		)
+	)
+	(sheet
+		(at 30 40)
+		(size 60 40)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(stroke
+			(width 0.1524)
+			(type solid)
+		)
+		(fill
+			(color 0 0 0 0)
+		)
+		(uuid "237c2180-4b06-4867-a3ec-e31dd83c5b27")
+		(property "Sheetname" "Power Input"
+			(at 30 39.2884 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left bottom)
+			)
+		)
+		(property "Sheetfile" "power_input.kicad_sch"
+			(at 30 60 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left top)
+			)
+		)
+		(instances
+			(project "wheelchairpro"
+				(path "/76e39e4d-e544-4516-8ada-6f2987319d1a"
+					(page "2")
+				)
+			)
+		)
+	)
+	(sheet_instances
+		(path "/"
+			(page "1")
+		)
+	)
+	(embedded_fonts no)
+)

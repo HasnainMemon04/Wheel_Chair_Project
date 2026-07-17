@@ -1,69 +1,77 @@
 const crypto = require('crypto');
+// fetch is globally available in modern Node.js
 
-function calculateHMAC(payload, key) {
-  return crypto.createHmac('sha256', key).update(payload).digest('hex');
+const DEVICE_ID = 'WCHAIR-001';
+const DEVICE_KEY = 'super-secret-key-123';
+const SUPABASE_URL = 'https://txqjevrhedgsjltnflmg.supabase.co';
+const INGEST_URL = `${SUPABASE_URL}/functions/v1/ingest`;
+
+function generateHMAC(message, key) {
+  return crypto.createHmac('sha256', key).update(message).digest('hex');
 }
 
-async function run() {
-  const supabaseUrl = 'https://txqjevrhedgsjltnflmg.supabase.co';
-  const deviceId = 'WCHAIR-001';
-  const deviceKey = 'super-secret-key-123';
-  
-  const payload = {
-    kind: 'telemetry',
-    id: deviceId,
+async function testIngest() {
+  console.log("--- Testing Supabase Ingest Edge Function ---");
+
+  // Create a realistic telemetry payload with tamper_count: 2
+  const telemetryPayload = {
+    kind: "telemetry",
+    id: DEVICE_ID,
     ts: Math.floor(Date.now() / 1000),
-    fw: '0.1.0',
-    up: 100,
+    fw: "0.1.0",
+    up: 120,
     fix: 1,
-    lat: 24.860731,
-    lng: 67.001142,
+    lat: 24.86007239,
+    lng: 67.06373067,
     spd: 0.0,
     sats: 8,
-    hdop: 1.2,
+    hdop: 1.1,
     pitch: 0.0,
     roll: 0.0,
-    tilt: 0.0,
-    temp_motor: 25.0,
-    temp_batt: 25.0,
-    temp_amb: 25.0,
-    humidity: 60,
-    batt_v: 4.1,
-    batt_pct: 95,
-    occupied: 0,
-    rssi: -50,
+    tilt: 4.2,
+    temp_batt: 34.5,
+    batt_v: 4.18,
+    batt_pct: 98,
+    in_motion: 0,
+    tamper: 0,
+    tamper_count: 2,
+    rssi: -82,
     power: 1,
     locked: 1,
-    session_state: 'LOCKED',
+    session_state: "LOCKED",
     time_left: 0,
-    speed_limit: 6,
-    over_speed: 0,
-    gf: { on: 1, in: 1, dist: 0, r: 300 }
+    gf: {
+      on: 1,
+      in: 0,
+      dist: 6315.06,
+      r: 300,
+      lat: 24.860731,
+      lng: 67.001142
+    }
   };
-  
-  const bodyStr = JSON.stringify(payload);
-  const signature = calculateHMAC(bodyStr, deviceKey);
-  
-  const url = `${supabaseUrl}/functions/v1/ingest`;
-  console.log("Ingest URL:", url);
-  
+
+  const bodyText = JSON.stringify(telemetryPayload);
+  const signature = generateHMAC(bodyText, DEVICE_KEY);
+
+  console.log("Sending payload...");
   try {
-    const res = await fetch(url, {
+    const response = await fetch(INGEST_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-device-id': deviceId,
+        'x-device-id': DEVICE_ID,
         'x-device-signature': signature
       },
-      body: bodyStr
+      body: bodyText
     });
-    
-    console.log("Ingest Status:", res.status);
-    const text = await res.text();
-    console.log("Ingest Body:", text);
+
+    const status = response.status;
+    const responseText = await response.text();
+    console.log(`HTTP Status: ${status}`);
+    console.log(`Response: ${responseText}`);
   } catch (err) {
-    console.error("Fetch error:", err);
+    console.error("Request failed:", err);
   }
 }
 
-run();
+testIngest();

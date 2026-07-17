@@ -104,11 +104,8 @@ body {
   border-radius: var(--radius);
 }
 
-/* Leaflet Dark Map Filter */
-.dark-map .leaflet-tile {
-  filter: brightness(0.6) invert(1) contrast(3) hue-rotate(200deg) saturate(0.3) !important;
-}
-
+/* Leaflet dark map: native dark raster tiles (CartoDB dark_all) — the old
+   per-tile invert/hue-rotate filter was GPU-expensive on every pan/zoom. */
 .dark-map .leaflet-container {
   background: #09090b !important;
   font-family: inherit;

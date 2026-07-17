@@ -47,7 +47,8 @@ flowchart LR
 - **`ingest` Edge Function:** the only writer of device data. Validates the device key + HMAC,
   checks the API.md JSON, rate-limits, **upserts `device_state`** and **appends a downsampled
   row to `telemetry_history`**, and inserts `events`.
-- **`commands` Edge Function:** device polls pending commands (device-key scoped) and posts acks.
+- **`commands` Edge Function:** simulator GETs pending commands; firmware posts signed acks after
+  receiving pending rows piggybacked from `/ingest`.
 - **Scheduled function (pg_cron):** runs every ~10–30 s, finds sessions crossing the warn/expiry
   thresholds, updates `rentals.state`, and inserts `WARN_EXPIRY` / `END_SESSION` commands. This is
   the "rental engine" — Supabase, not a long-running server.
@@ -78,7 +79,7 @@ flowchart TB
     T_NET[Task: Net\nWiFi + HTTPS client] <--> STATE
     T_PUB[Task: Uploader\nPOST /ingest @1Hz] --> T_NET
     STATE --> T_PUB
-    T_CMD[Task: Command poller\nGET /commands + ack] --> STATE
+    T_CMD[Task: Command handler\n/ingest commands + ack] --> STATE
     T_OTA[Task: OTA\nversion check + apply] --> T_NET
   end
 ```
@@ -93,7 +94,7 @@ flowchart TB
 | **Safety Supervisor** | 20 Hz | **highest priority** — turns interlocks into relay/buzzer actions |
 | Net | event | WiFi + HTTPS (TLS) client, reconnect/backoff |
 | Uploader | 1 Hz | serialize shared state → `POST /ingest` (telemetry + events) |
-| Command poller | every `COMMAND_POLL_MS` | `GET /commands?pending`, execute, `POST ack` |
+| Command handler | every telemetry response | execute piggybacked `/ingest` commands, `POST ack` |
 | OTA | on command / hourly | check version, pull + verify + flash |
 
 ### Safety Supervisor priority (overrides rental logic)
@@ -113,7 +114,8 @@ flowchart TB
 
 **Unlock after payment:** rider pays → gateway → Vercel `/api/payments/webhook` (verify signature)
 → mark `payments` PAID → `rentals` → ACTIVE → insert `UNLOCK` (+ `SET_SPEED_LIMIT`, `SET_GEOFENCE`)
-into `commands` → device polls, enables motion relay, posts `ack` → Realtime shows "Unlocked".
+into `commands` → firmware receives the command in the next `/ingest` response, enables motion
+relay, posts `ack` → Realtime shows "Unlocked".
 
 **Reconnect re-assert:** device rejoins WiFi → resumes uploads; it re-reads its desired fields from
 `device_state` (locked/speed_limit/geofence) and any still-pending commands, so it can never come

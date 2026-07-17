@@ -31,7 +31,7 @@ flowchart LR
   GW[Payment Gateway]
 
   FW -- HTTPS POST telemetry/events --> ING --> DB
-  FW -- HTTPS GET poll pending cmds --> CMDQ
+  FW -- HTTPS POST ack executed cmds --> CMDQ
   DB --> RT
   WEB <-- Realtime subscribe (WSS) --- RT
   WEB <-- REST/RPC --- DB
@@ -55,9 +55,9 @@ flowchart LR
   tables directly.
 - **Live to website:** Supabase **Realtime** pushes row changes over WebSocket → the site
   updates in < 500 ms with no polling.
-- **Commands down:** operator/web writes a row to `commands` → device **polls** `/commands?pending`
-  every 1–2 s (robust on ESP32) and writes an `ack`. (Realtime-over-WSS on device is an optional
-  upgrade.)
+- **Commands down:** operator/web writes a row to `commands` -> the next firmware `POST /ingest`
+  response piggybacks pending commands, and the device writes an `ack`. The Python simulator still
+  uses `GET /commands?pending`.
 - **Payments:** gateway → Vercel `/api/payments/webhook` (verify signature) → mark paid → insert
   UNLOCK command. Never unlock from the client.
 

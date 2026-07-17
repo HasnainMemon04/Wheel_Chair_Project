@@ -2,7 +2,6 @@
 #include <Arduino.h>
 
 void initActuators();
-void setPowerRelay(bool on);
 void setMotionRelay(bool allowMotion);
 void buzzerWrite(bool on);
 void buzzerChirp(int count, int delayMs);
@@ -13,3 +12,5 @@ void triggerManualSOS();
 void clearManualSOS();
 void clearTamper();
 void safetySupervisorTask(void *pvParameters);
+bool isSafetyFaultActive();
+bool isOTASafetyFaultActive();

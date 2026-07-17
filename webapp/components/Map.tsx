@@ -24,6 +24,7 @@ interface MarkerAnimationData {
   startTime: number;
   duration: number;
   animationFrameId?: number;
+  iconKey: string; // theme color the current icon was built with (W9)
 }
 
 // Calculate bearing angle between two LatLng coordinates
@@ -60,8 +61,10 @@ export default function Map({ deviceStates, selectedId, onSelectDevice }: MapPro
       attributionControl: false
     });
 
-    // Dark-first tile layer (styled via CSS .dark-map filter in globals.css)
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+    // Native dark raster basemap (W6): real dark tiles instead of inverting
+    // light tiles with a per-tile CSS filter (which taxed the GPU on every
+    // pan/zoom frame).
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
       maxZoom: 19,
     }).addTo(map);
 
@@ -72,6 +75,14 @@ export default function Map({ deviceStates, selectedId, onSelectDevice }: MapPro
     mapRef.current = map;
 
     return () => {
+      // W5: cancel ALL in-flight marker animation frames — after unmount they
+      // would keep calling setLatLng/getElement on detached markers for up to
+      // 800ms per tween.
+      Object.values(markersRef.current).forEach((entry) => {
+        if (entry.animationFrameId) cancelAnimationFrame(entry.animationFrameId);
+      });
+      markersRef.current = {};
+
       // Clean up map on unmount
       if (mapRef.current) {
         mapRef.current.remove();
@@ -109,14 +120,16 @@ export default function Map({ deviceStates, selectedId, onSelectDevice }: MapPro
         : '#10b981'; // green if active/unlocked
 
       const existing = markersRef.current[wheelchair_id];
-      const currentBearing = existing ? existing.bearing : 0;
 
-      // Create Custom SVG Marker Icon with directional indicator pointing forward
-      const customIcon = L.divIcon({
+      // W9: the icon markup only depends on the theme color — bearing rotation
+      // is applied to the live SVG element during animation. Rebuild it ONLY
+      // when the color changes; unconditional setIcon() replaced the DOM node
+      // every update, resetting the transform and fighting the RAF tween.
+      const makeIcon = (bearing: number) => L.divIcon({
         className: 'custom-wheelchair-marker',
         html: `
           <div class="pulse-marker" style="display: flex; align-items: center; justify-content: center; width: 36px; height: 36px;">
-            <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg" style="transform: rotate(${currentBearing}deg); transition: transform 0.3s ease-out; transform-origin: center;">
+            <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg" style="transform: rotate(${bearing}deg); transition: transform 0.3s ease-out; transform-origin: center;">
               <circle cx="18" cy="18" r="14" fill="${themeColor}" fill-opacity="0.15" stroke="${themeColor}" stroke-width="2.5"/>
               <circle cx="18" cy="18" r="6" fill="${themeColor}" stroke="#ffffff" stroke-width="1.5"/>
               <path d="M18 4L22 9H14L18 4Z" fill="#ffffff" />
@@ -130,7 +143,7 @@ export default function Map({ deviceStates, selectedId, onSelectDevice }: MapPro
 
       if (!existing) {
         // Create new Marker
-        const marker = L.marker([lat, lng], { icon: customIcon }).addTo(map);
+        const marker = L.marker([lat, lng], { icon: makeIcon(0) }).addTo(map);
 
         // Bind interactive popup
         const popupContent = `
@@ -140,11 +153,6 @@ export default function Map({ deviceStates, selectedId, onSelectDevice }: MapPro
               !online ? 'Offline' : isTampered ? 'Tamper Alarm' : isBreached ? 'Breached' : locked ? 'Locked' : 'Active'
             }</span></p>
             <p class="text-xs text-muted-foreground">Battery: ${device.batt_pct}% (${device.batt_v.toFixed(2)}V)</p>
-            ${
-              device.temp_amb !== undefined && device.temp_amb !== null
-                ? `<p class="text-xs text-muted-foreground mt-0.5">Climate: ${device.temp_amb.toFixed(1)}°C / ${device.humidity.toFixed(1)}%</p>`
-                : ''
-            }
           </div>
         `;
         marker.bindPopup(popupContent);
@@ -183,11 +191,15 @@ export default function Map({ deviceStates, selectedId, onSelectDevice }: MapPro
           targetLng: lng,
           bearing: 0,
           startTime: 0,
-          duration: 800
+          duration: 800,
+          iconKey: themeColor
         };
       } else {
-        // Update Marker icon to reflect potential color changes
-        existing.marker.setIcon(customIcon);
+        // W9: rebuild the icon only when its color actually changed.
+        if (existing.iconKey !== themeColor) {
+          existing.marker.setIcon(makeIcon(existing.bearing));
+          existing.iconKey = themeColor;
+        }
 
         // Update popup content
         const popupContent = `
@@ -197,11 +209,6 @@ export default function Map({ deviceStates, selectedId, onSelectDevice }: MapPro
               !online ? 'Offline' : isTampered ? 'Tamper Alarm' : isBreached ? 'Breached' : locked ? 'Locked' : 'Active'
             }</span></p>
             <p class="text-xs text-muted-foreground">Battery: ${device.batt_pct}% (${device.batt_v.toFixed(2)}V)</p>
-            ${
-              device.temp_amb !== undefined && device.temp_amb !== null
-                ? `<p class="text-xs text-muted-foreground mt-0.5">Climate: ${device.temp_amb.toFixed(1)}°C / ${device.humidity.toFixed(1)}%</p>`
-                : ''
-            }
           </div>
         `;
         existing.marker.setPopupContent(popupContent);

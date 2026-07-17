@@ -73,7 +73,7 @@ serve(async (req) => {
     // 3. Query the registered wheelchair & its device key
     const { data: wheelchair, error: dbError } = await supabase
       .from('wheelchairs')
-      .select('device_key')
+      .select('device_key, target_version, fw_version, ota_status, ota_progress, ota_last_error')
       .eq('id', deviceId)
       .single();
 
@@ -100,6 +100,51 @@ serve(async (req) => {
 
     // 5. Route based on kind
     if (payload.kind === 'telemetry') {
+      // H1: fw/OTA metadata only changes during an OTA. Compare against the
+      // wheelchairs row we already fetched and UPDATE only when something
+      // actually changed (was: an unconditional UPDATE on every 1Hz packet —
+      // needless WAL churn and row locks at fleet scale).
+      const newFw = payload.fw ?? null;
+      const newOtaStatus = payload.ota_status || 'idle';
+      const newOtaProgress = payload.ota_progress ?? 0;
+      const newOtaError = payload.ota_last_error || null;
+      const otaMetaChanged =
+        (wheelchair.fw_version ?? null) !== newFw ||
+        (wheelchair.ota_status || 'idle') !== newOtaStatus ||
+        (wheelchair.ota_progress ?? 0) !== newOtaProgress ||
+        (wheelchair.ota_last_error || null) !== newOtaError;
+
+      if (otaMetaChanged) {
+        const { error: fwError } = await supabase
+          .from('wheelchairs')
+          .update({
+            fw_version: newFw,
+            ota_status: newOtaStatus,
+            ota_progress: newOtaProgress,
+            ota_last_error: newOtaError
+          })
+          .eq('id', deviceId);
+
+        if (fwError) {
+          console.error("Error updating wheelchair OTA metadata:", fwError);
+        }
+      }
+
+      // H2: gap-based history downsampling. device_state.hist_up remembers the
+      // device uptime of the last persisted history row; we insert when >=10s
+      // of DEVICE time has elapsed (or on the first sample / after a reboot).
+      // A missed upload no longer permanently drops the slot (was `up % 10`),
+      // and a missing `up` no longer writes a bogus t=0 row.
+      const up = typeof payload.up === 'number' && isFinite(payload.up) ? payload.up : null;
+      const { data: prevState } = await supabase
+        .from('device_state')
+        .select('hist_up')
+        .eq('wheelchair_id', deviceId)
+        .maybeSingle();
+      const lastHistUp = prevState?.hist_up ?? null;
+      const persistHistory =
+        up !== null && (lastHistUp === null || up < lastHistUp /* reboot */ || up - lastHistUp >= 10);
+
       // Upsert device_state (HOT SNAPSHOT)
       const { error: stateError } = await supabase
         .from('device_state')
@@ -115,15 +160,18 @@ serve(async (req) => {
           pitch: payload.pitch,
           roll: payload.roll,
           tilt: payload.tilt,
+          yaw: payload.yaw,
           temp_motor: payload.temp_motor,
           temp_batt: payload.temp_batt,
           temp_amb: payload.temp_amb,
           humidity: payload.humidity,
           batt_v: payload.batt_v,
           batt_pct: payload.batt_pct,
-          occupied: payload.occupied === 1,
+          in_motion: payload.in_motion === 1,
           tamper: payload.tamper === 1,
           tamper_count: payload.tamper_count ?? 0,
+          uptime: up,                                    // C1: uptime persisted (NOT a timestamp)
+          hist_up: persistHistory ? up : lastHistUp,     // H2: downsampling state
           rssi: payload.rssi,
           power: payload.power === 1,
           locked: payload.locked === 1,
@@ -131,17 +179,20 @@ serve(async (req) => {
           time_left: payload.time_left,
           speed_limit: payload.speed_limit,
           over_speed: payload.over_speed === 1,
-          geofence: payload.gf
+          geofence: payload.gf,
+          fw_version: payload.fw,
+          target_version: wheelchair?.target_version || null,
+          ota_status: payload.ota_status || 'idle',
+          ota_progress: payload.ota_progress ?? 0,
+          ota_last_error: payload.ota_last_error || null
         });
 
       if (stateError) {
         throw new Error(`State upsert error: ${stateError.message}`);
       }
 
-      // Downsample and append to history (COLD HISTORY)
-      // Save history row only if uptime_s is a multiple of 10 (1-in-10s downsampling)
-      const uptime = payload.up ?? 0;
-      if (uptime % 10 === 0) {
+      // Append to history (COLD HISTORY) using the gap-based decision above.
+      if (persistHistory) {
         const { error: histError } = await supabase
           .from('telemetry_history')
           .insert({
@@ -156,13 +207,23 @@ serve(async (req) => {
       }
 
     } else if (payload.kind === 'event') {
+      // H3: events.detail is a jsonb column whose contract is "object". If the
+      // device sent a truncated/garbled detail (a bare string), wrap it so we
+      // never silently store a jsonb scalar that breaks detail->>'field' reads.
+      let detail = payload.detail;
+      if (detail === null || detail === undefined) {
+        detail = {};
+      } else if (typeof detail !== 'object' || Array.isArray(detail)) {
+        detail = { raw: String(detail) };
+      }
+
       // Insert to events table
       const { error: eventError } = await supabase
         .from('events')
         .insert({
           wheelchair_id: deviceId,
           type: payload.event,
-          detail: payload.detail || {},
+          detail: detail,
           lat: payload.lat,
           lng: payload.lng,
           ts: ts

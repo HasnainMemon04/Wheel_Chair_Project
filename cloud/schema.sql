@@ -28,10 +28,12 @@ create table if not exists device_state (
   online        boolean default false,
   lat double precision, lng double precision,
   speed real, sats int, hdop real,
-  pitch real, roll real, tilt real,
+  pitch real, roll real, tilt real, yaw real,
   temp_motor real, temp_batt real, temp_amb real, humidity real,
-  batt_v real, batt_pct int, occupied boolean, rssi int,
+  batt_v real, batt_pct int, in_motion boolean, rssi int,
   tamper boolean default false, tamper_count int default 0,
+  uptime int,          -- device uptime seconds (from telemetry `up`; NOT a timestamp)
+  hist_up int,         -- uptime at the last telemetry_history insert (gap-based downsampling)
   power boolean, locked boolean,
   session_state text, time_left int, speed_limit int, over_speed boolean,
   geofence jsonb
@@ -50,6 +52,24 @@ create index if not exists idx_hist_chair_ts on telemetry_history (wheelchair_id
 -- Anti-tamper columns (idempotent — safe to re-run on an already-deployed DB).
 alter table device_state add column if not exists tamper       boolean default false;
 alter table device_state add column if not exists tamper_count int default 0;
+alter table device_state add column if not exists yaw          real default 0.0;
+
+-- C1: persist device uptime (seconds) — distinct from the ts wall-clock column.
+alter table device_state add column if not exists uptime  int;
+-- H2: uptime at the last telemetry_history insert (gap-based downsampling state).
+alter table device_state add column if not exists hist_up int;
+
+-- Safe column rename migrations
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='device_state' AND column_name='temp_board') THEN
+    ALTER TABLE device_state RENAME COLUMN temp_board TO temp_batt;
+  END IF;
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='device_state' AND column_name='occupied') THEN
+    ALTER TABLE device_state RENAME COLUMN occupied TO in_motion;
+  END IF;
+END $$;
+
 
 create table if not exists events (
   id            bigserial primary key,
@@ -83,7 +103,7 @@ create table if not exists payments (
   paid_at       timestamptz
 );
 
--- Command queue: operator/web inserts; device polls pending; device writes ack.
+-- Command queue: operator/web inserts; firmware receives pending rows via ingest and writes ack.
 create table if not exists commands (
   id            uuid primary key default gen_random_uuid(),
   wheelchair_id text not null references wheelchairs(id) on delete cascade,
@@ -96,6 +116,7 @@ create table if not exists commands (
   acked_at      timestamptz
 );
 create index if not exists idx_cmd_chair_status on commands (wheelchair_id, status);
+create index if not exists idx_cmd_req_id on commands (req_id);
 
 -- ---------------------------------------------------------------------------
 -- Realtime: expose the small/live tables to the website.
@@ -165,62 +186,226 @@ grant select, insert, update, delete on public.payments to service_role;
 grant select, insert, update, delete on public.commands to service_role;
 
 -- ---------------------------------------------------------------------------
+-- C2: Atomic payment → activation → unlock (called by the Vercel webhook).
+-- The payment insert, rental activation, and command enqueue commit or roll
+-- back as ONE transaction — a webhook crash can no longer leave a rider who
+-- paid with an "active" rental and no UNLOCK command ever queued.
+-- Command req_ids are DETERMINISTIC (keyed on the rental id) so retries and
+-- the reconciler below are idempotent.
+-- ---------------------------------------------------------------------------
+create or replace function activate_rental_tx(
+  p_rental_id   uuid,
+  p_amount      int,
+  p_provider    text,
+  p_provider_ref text,
+  p_currency    text default 'PKR'
+) returns jsonb as $$
+declare
+  v_rental rentals%rowtype;
+  v_lat double precision;
+  v_lng double precision;
+  v_unlock_dispatched boolean;
+begin
+  -- Serialize concurrent webhook retries for the same rental.
+  select * into v_rental from rentals where id = p_rental_id for update;
+  if not found then
+    return jsonb_build_object('ok', false, 'error', 'rental_not_found');
+  end if;
+
+  if v_rental.state = 'active' then
+    -- Idempotency guard that is SAFE: only short-circuit if an UNLOCK was
+    -- actually dispatched for this rental. Otherwise fall through and repair
+    -- (fixes the historical partial-failure trap).
+    select exists (
+      select 1 from commands c
+      where c.wheelchair_id = v_rental.wheelchair_id
+        and c.cmd = 'UNLOCK'
+        and c.req_id = 'unlock-' || p_rental_id::text
+    ) into v_unlock_dispatched;
+    if v_unlock_dispatched then
+      return jsonb_build_object('ok', true, 'message', 'already_active');
+    end if;
+  elsif v_rental.state <> 'reserved' then
+    return jsonb_build_object('ok', false, 'error', 'invalid_state', 'state', v_rental.state);
+  end if;
+
+  -- 1. Payment record (idempotent on the unique provider_ref).
+  insert into payments (rental_id, amount, currency, provider, provider_ref, status, paid_at)
+  values (p_rental_id, p_amount, p_currency, p_provider, p_provider_ref, 'PAID', now())
+  on conflict (provider_ref) do nothing;
+
+  -- 2. Activate the rental (coalesce keeps a repair pass from extending it).
+  update rentals
+  set state    = 'active',
+      start_at = coalesce(start_at, now()),
+      end_at   = coalesce(end_at, now() + make_interval(secs => duration_s))
+  where id = p_rental_id;
+
+  -- 3. Geofence center from the chair's last known position.
+  select ds.lat, ds.lng into v_lat, v_lng
+  from device_state ds where ds.wheelchair_id = v_rental.wheelchair_id;
+
+  -- 4. Enqueue UNLOCK + SET_SPEED_LIMIT + SET_GEOFENCE (idempotent req_ids).
+  insert into commands (wheelchair_id, cmd, args, status, req_id)
+  select v_rental.wheelchair_id, c.cmd, c.args, 'pending', c.req_id
+  from (values
+    ('UNLOCK',
+     jsonb_build_object('duration_s', v_rental.duration_s),
+     'unlock-' || p_rental_id::text),
+    ('SET_SPEED_LIMIT',
+     jsonb_build_object('kmh', coalesce(v_rental.speed_limit, 6)),
+     'speed-' || p_rental_id::text),
+    ('SET_GEOFENCE',
+     jsonb_build_object('lat', coalesce(v_lat, 24.860731),
+                        'lng', coalesce(v_lng, 67.001142),
+                        'radius', 300),
+     'geofence-' || p_rental_id::text)
+  ) as c(cmd, args, req_id)
+  where not exists (
+    select 1 from commands k
+    where k.wheelchair_id = v_rental.wheelchair_id and k.req_id = c.req_id
+  );
+
+  return jsonb_build_object('ok', true, 'unlocked', true);
+end;
+$$ language plpgsql security definer;
+
+-- Only the service role (webhook) may invoke the money-touching transaction.
+revoke execute on function activate_rental_tx(uuid, int, text, text, text) from public, anon, authenticated;
+grant execute on function activate_rental_tx(uuid, int, text, text, text) to service_role;
+
+-- ---------------------------------------------------------------------------
 -- Rental State Session Supervisor Task (Cron Engine Backend Authority)
 -- ---------------------------------------------------------------------------
+-- C3 + M4 rewrite. Changes vs the original:
+--  * SET-BASED statements (no per-rental loop) so a large fleet can't make a
+--    run overlap the next pg_cron minute (overlapping runs get skipped).
+--  * Expired rentals go to the intermediate state 'ending' — NOT straight to
+--    'ended'. The DEVICE is the authority: the commands/ack handler promotes
+--    'ending' → 'ended' when the device acks END_SESSION. If the device never
+--    acks (offline) a grace period closes the rental and emits a visible
+--    SESSION_END_OFFLINE event instead of silently lying.
+--  * C2 reconciler: repairs 'active' rentals whose UNLOCK was never dispatched.
 create or replace function check_rental_sessions()
 returns void as $$
-declare
-  r record;
-  req_id_str text;
-  time_left_s int;
 begin
-  -- 1. Check for expired rentals that are still active or expiring (Defensive time drift catch-all)
-  for r in 
-    select id, wheelchair_id, end_at
-    from rentals
-    where state in ('active', 'expiring') and end_at <= now()
-  loop
-    req_id_str := 'cron-' || substring(gen_random_uuid()::text from 1 for 8);
-    
-    -- Transition rental state
-    update rentals set state = 'ended' where id = r.id;
-    
-    -- Insert END_SESSION command to trigger device deceleration and locking
+  -- 1. Expired active/expiring rentals -> 'ending' + queue END_SESSION.
+  with expired as (
+    update rentals r
+    set state = 'ending'
+    where r.state in ('active', 'expiring') and r.end_at <= now()
+    returning r.id, r.wheelchair_id
+  ),
+  cmds as (
     insert into commands (wheelchair_id, cmd, req_id, status, args)
-    values (r.wheelchair_id, 'END_SESSION', req_id_str, 'pending', '{}'::jsonb);
-    
-    -- Insert events history entry
-    insert into events (wheelchair_id, type, detail, lat, lng)
-    select wheelchair_id, 'SESSION_LOCKED', '{}'::jsonb, lat, lng
-    from device_state
-    where wheelchair_id = r.wheelchair_id;
-  end loop;
+    select e.wheelchair_id, 'END_SESSION', 'end-' || e.id::text, 'pending', '{}'::jsonb
+    from expired e
+    where not exists (select 1 from commands c where c.req_id = 'end-' || e.id::text)
+    returning 1
+  )
+  insert into events (wheelchair_id, type, detail, lat, lng)
+  select e.wheelchair_id, 'SESSION_LOCKED', jsonb_build_object('rental_id', e.id), ds.lat, ds.lng
+  from expired e
+  left join device_state ds on ds.wheelchair_id = e.wheelchair_id;
 
-  -- 2. Check for rentals entering warning window (<= 120s left)
-  for r in 
-    select id, wheelchair_id, end_at
-    from rentals
-    where state = 'active' and end_at <= now() + interval '120 seconds' and end_at > now()
-  loop
-    req_id_str := 'cron-' || substring(gen_random_uuid()::text from 1 for 8);
-    time_left_s := extract(epoch from (r.end_at - now()))::int;
-    
-    -- Transition rental state
-    update rentals set state = 'expiring' where id = r.id;
-    
-    -- Insert WARN_EXPIRY command
+  -- 2. Grace fallback: device never acked END_SESSION within 2 minutes of
+  --    expiry (most likely offline). Close the rental but FLAG it loudly.
+  with overdue as (
+    update rentals r
+    set state = 'ended'
+    where r.state = 'ending'
+      and r.end_at <= now() - interval '2 minutes'
+      and not exists (
+        select 1 from commands c
+        where c.req_id = 'end-' || r.id::text and c.status = 'acked'
+      )
+    returning r.id, r.wheelchair_id
+  )
+  insert into events (wheelchair_id, type, detail, lat, lng)
+  select o.wheelchair_id, 'SESSION_END_OFFLINE',
+         jsonb_build_object('rental_id', o.id,
+                            'reason', 'device did not ack END_SESSION within grace period'),
+         ds.lat, ds.lng
+  from overdue o
+  left join device_state ds on ds.wheelchair_id = o.wheelchair_id;
+
+  -- 3. Warning window (<= 120s left) -> 'expiring' + WARN_EXPIRY.
+  with warned as (
+    update rentals r
+    set state = 'expiring'
+    where r.state = 'active' and r.end_at <= now() + interval '120 seconds' and r.end_at > now()
+    returning r.id, r.wheelchair_id, greatest(0, extract(epoch from (r.end_at - now()))::int) as tl
+  ),
+  wcmds as (
     insert into commands (wheelchair_id, cmd, req_id, status, args)
-    values (r.wheelchair_id, 'WARN_EXPIRY', req_id_str, 'pending', jsonb_build_object('time_left', time_left_s));
-    
-    -- Insert warning event
-    insert into events (wheelchair_id, type, detail, lat, lng)
-    select wheelchair_id, 'EXPIRY_WARNING', jsonb_build_object('time_left', time_left_s), lat, lng
-    from device_state
-    where wheelchair_id = r.wheelchair_id;
-  end loop;
+    select w.wheelchair_id, 'WARN_EXPIRY', 'warn-' || w.id::text, 'pending',
+           jsonb_build_object('time_left', w.tl)
+    from warned w
+    where not exists (select 1 from commands c where c.req_id = 'warn-' || w.id::text)
+    returning 1
+  )
+  insert into events (wheelchair_id, type, detail, lat, lng)
+  select w.wheelchair_id, 'EXPIRY_WARNING', jsonb_build_object('time_left', w.tl), ds.lat, ds.lng
+  from warned w
+  left join device_state ds on ds.wheelchair_id = w.wheelchair_id;
+
+  -- 4. C2 reconciler (safety net): an 'active' rental with NO UNLOCK dispatched
+  --    since it was created means a partial webhook failure — repair it.
+  insert into commands (wheelchair_id, cmd, args, status, req_id)
+  select r.wheelchair_id, 'UNLOCK',
+         jsonb_build_object('duration_s', r.duration_s), 'pending',
+         'unlock-' || r.id::text
+  from rentals r
+  where r.state = 'active'
+    and r.end_at > now()
+    and not exists (
+      select 1 from commands c
+      where c.wheelchair_id = r.wheelchair_id
+        and c.cmd = 'UNLOCK'
+        and c.req_id = 'unlock-' || r.id::text
+    );
 end;
 $$ language plpgsql;
+
+-- M4: the supervisor filters on (state, end_at) every minute — index it.
+create index if not exists idx_rentals_state_end on rentals (state, end_at);
 
 -- Enable pg_cron and schedule task (default schedule runs every minute)
 create extension if not exists pg_cron;
 select cron.schedule('check-sessions', '* * * * *', 'select check_rental_sessions()');
+
+-- OTA System schema updates
+alter table public.wheelchairs add column if not exists target_version  text;
+alter table public.wheelchairs add column if not exists ota_status      text default 'idle';
+alter table public.wheelchairs add column if not exists ota_progress    int default 0;
+alter table public.wheelchairs add column if not exists ota_last_error  text;
+
+alter table public.device_state add column if not exists fw_version      text;
+alter table public.device_state add column if not exists target_version  text;
+alter table public.device_state add column if not exists ota_status      text default 'idle';
+alter table public.device_state add column if not exists ota_progress    int default 0;
+alter table public.device_state add column if not exists ota_last_error  text;
+
+
+create table if not exists public.firmware_releases (
+  id          bigserial primary key,
+  version     text not null unique,
+  url         text not null,
+  size        bigint not null,
+  notes       text,
+  created_at  timestamptz default now()
+);
+
+grant select, insert, update, delete on public.firmware_releases to anon, authenticated, service_role;
+
+-- Ensure storage bucket for firmware exists
+insert into storage.buckets (id, name, public)
+values ('firmware', 'firmware', true)
+on conflict (id) do nothing;
+
+-- Create policies to allow public uploads and downloads to the firmware storage bucket in dev mode
+create policy "Allow public uploads to firmware bucket"
+on storage.objects for insert with check (bucket_id = 'firmware');
+
+create policy "Allow public reads from firmware bucket"
+on storage.objects for select using (bucket_id = 'firmware');
