@@ -58,14 +58,19 @@ export default function OperatorPage() {
 
   // Prefill geofence coordinates when a new device is selected
   useEffect(() => {
-    if (selectedChair) {
-      setGfLat((selectedChair.lat ?? 0).toFixed(6));
-      setGfLng((selectedChair.lng ?? 0).toFixed(6));
-      if (selectedChair.geofence) {
-        setGfRadius(selectedChair.geofence.r);
+    if (selectedId) {
+      const chair = deviceStates.find((d) => d.wheelchair_id === selectedId);
+      if (chair) {
+        setGfLat((chair.lat ?? 0).toFixed(6));
+        setGfLng((chair.lng ?? 0).toFixed(6));
+        if (chair.geofence) {
+          setGfRadius(chair.geofence.r);
+        } else {
+          setGfRadius(300); // default fallback
+        }
       }
     }
-  }, [selectedChair]);
+  }, [selectedId]);
 
   // Reconcile optimistic states with incoming DB updates
   useEffect(() => {

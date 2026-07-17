@@ -611,21 +611,15 @@ void processCommands(const String &jsonResponse) {
             }
             ok = true;
         } else if (cmd == "SET_GEOFENCE") {
-            bool sessionActive = (sharedTelemetry.session_state == "ACTIVE" || sharedTelemetry.session_state == "EXPIRING");
-            if (!sessionActive) {
-                Serial.println("[Network] Rejected SET_GEOFENCE: no active device session.");
-                ok = false;
-            } else {
-                sharedTelemetry.gf.center_lat = lc.lat;
-                sharedTelemetry.gf.center_lng = lc.lng;
-                sharedTelemetry.gf.radius_m = lc.radius;
-                sharedTelemetry.gf.on = true;
-                // Recalculate inside/outside status immediately
-                double dist = calculateDistance(sharedTelemetry.gps_lat, sharedTelemetry.gps_lng, lc.lat, lc.lng);
-                sharedTelemetry.gf.dist_m = dist;
-                sharedTelemetry.gf.inside = (dist <= lc.radius);
-                ok = true;
-            }
+            sharedTelemetry.gf.center_lat = lc.lat;
+            sharedTelemetry.gf.center_lng = lc.lng;
+            sharedTelemetry.gf.radius_m = lc.radius;
+            sharedTelemetry.gf.on = true;
+            // Recalculate inside/outside status immediately
+            double dist = calculateDistance(sharedTelemetry.gps_lat, sharedTelemetry.gps_lng, lc.lat, lc.lng);
+            sharedTelemetry.gf.dist_m = dist;
+            sharedTelemetry.gf.inside = (dist <= lc.radius);
+            ok = true;
         } else if (cmd == "OTA") {
             xSemaphoreGive(stateMutex);
             handleOTACommand(lc.ota_url, lc.ota_version, lc.ota_size);
