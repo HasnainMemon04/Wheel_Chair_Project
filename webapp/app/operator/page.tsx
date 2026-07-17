@@ -282,15 +282,15 @@ export default function OperatorPage() {
         .from('firmware')
         .getPublicUrl(filePath);
 
-      // Save release metadata
+      // Save release metadata (using upsert to allow overwriting of same version)
       const { error: dbError } = await supabase
         .from('firmware_releases')
-        .insert({
+        .upsert({
           version: fwVersionInput,
           url: publicUrl,
           size: file.size,
           notes: fwNotesInput || null
-        });
+        }, { onConflict: 'version' });
 
       if (dbError) throw dbError;
 
