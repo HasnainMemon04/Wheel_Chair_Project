@@ -7,7 +7,7 @@ import { useFleetState } from '../../hooks/useFleetState';
 import { supabase } from '../../utils/supabase';
 import {
   Zap, Battery, ShieldAlert, Thermometer, Radio,
-  MapPin, Sliders, Play, Square, Unlock, Lock, RefreshCw, AlertTriangle, ShieldOff, Trash2
+  MapPin, Sliders, Play, Square, Unlock, Lock, RefreshCw, AlertTriangle, ShieldOff, Trash2, Activity
 } from 'lucide-react';
 import Link from 'next/link';
 
@@ -874,6 +874,63 @@ export default function OperatorPage() {
                         >
                           Apply Custom Geofence
                         </button>
+                      </div>
+
+                      {/* Device Diagnostics */}
+                      <div className="space-y-3 bg-zinc-900/30 p-3 rounded-lg border border-zinc-900">
+                        <div className="flex justify-between items-center text-xs">
+                          <span className="text-zinc-500 font-bold uppercase tracking-wider text-[10px]">Diagnostics</span>
+                          <span className="font-semibold text-zinc-300 text-[10px] bg-zinc-800 px-1.5 py-0.5 rounded">Hardware Test</span>
+                        </div>
+
+                        <button
+                          onClick={() => triggerCommand('DIAGNOSTIC_RUN')}
+                          disabled={actionLoading}
+                          className="w-full py-2.5 text-[10px] font-bold bg-zinc-850 hover:bg-zinc-800 border border-zinc-800 text-zinc-200 rounded transition-all cursor-pointer uppercase tracking-wider flex items-center justify-center gap-1.5"
+                        >
+                          <Activity className="w-3.5 h-3.5 text-blue-500" />
+                          Run Diagnostic Check
+                        </button>
+
+                        {/* Display latest diagnostic event result */}
+                        {(() => {
+                          const latestDiag = events.find(
+                            (ev) => ev.wheelchair_id === selectedChair.wheelchair_id && ev.type === 'DIAGNOSTIC_RESULT'
+                          );
+                          if (!latestDiag) {
+                            return (
+                              <div className="text-[10px] text-zinc-500 text-center py-1">
+                                No diagnostics run yet. Click button to test.
+                              </div>
+                            );
+                          }
+                          const { imu_status, gps_status, gps_sats, gps_hdop, raw_text } = latestDiag.detail || {};
+                          return (
+                            <div className="space-y-2 border-t border-zinc-900 pt-2.5 mt-2">
+                              <div className="grid grid-cols-2 gap-1.5 text-[9px] uppercase font-semibold">
+                                <div className="p-1.5 rounded bg-zinc-900/60 border border-zinc-900/40 flex flex-col">
+                                  <span className="text-zinc-500">IMU Sensor</span>
+                                  <span className={imu_status === 'OK' ? 'text-emerald-400 font-bold' : 'text-red-400 font-bold'}>
+                                    {imu_status || 'UNKNOWN'}
+                                  </span>
+                                </div>
+                                <div className="p-1.5 rounded bg-zinc-900/60 border border-zinc-900/40 flex flex-col">
+                                  <span className="text-zinc-500">GPS Signal</span>
+                                  <span className={gps_status === 'OK' ? 'text-emerald-400 font-bold' : 'text-red-400 font-bold'}>
+                                    {gps_status || 'UNKNOWN'} ({gps_sats || 0} Sats)
+                                  </span>
+                                </div>
+                              </div>
+                              <div className="p-2 rounded bg-zinc-950/80 border border-zinc-900 text-[10px] font-mono text-zinc-400 break-words leading-relaxed max-h-[80px] overflow-y-auto">
+                                <div className="text-[8px] text-zinc-500 font-bold uppercase tracking-wider mb-0.5">Raw NMEA / Status:</div>
+                                {raw_text || 'No raw string returned.'}
+                              </div>
+                              <div className="text-[8px] text-zinc-600 text-right font-semibold">
+                                Checked: {new Date(latestDiag.ts).toLocaleTimeString()}
+                              </div>
+                            </div>
+                          );
+                        })()}
                       </div>
                     </div>
                   </div>

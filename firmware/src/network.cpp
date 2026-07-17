@@ -587,6 +587,30 @@ void processCommands(const String &jsonResponse) {
             sharedTelemetry.tamper_warn_count = 0;
             clearTamper();
             ok = true;
+        } else if (cmd == "DIAGNOSTIC_RUN") {
+            // Read status variables safely under mutex
+            String imuStatus = mpuOK ? "OK" : "FAIL";
+            bool gpsFix = sharedTelemetry.gps_fix;
+            String gpsStatus = gpsFix ? "OK" : "NO_FIX";
+            int sats = sharedTelemetry.gps_sats;
+            float hdop = sharedTelemetry.gps_hdop;
+            double lat = sharedTelemetry.gps_lat;
+            double lng = sharedTelemetry.gps_lng;
+            
+            // Build raw status summary sentence
+            char rawDbg[256];
+            snprintf(rawDbg, sizeof(rawDbg), 
+                     "IMU: MPU6500 %s. GPS: Neo-M8N %s, Sats: %d, HDOP: %.2f. Lat/Lng: %.6f, %.6f",
+                     imuStatus.c_str(), gpsStatus.c_str(), sats, hdop, lat, lng);
+            
+            // Create JSON detail string
+            String detailJson = "{\"imu_status\":\"" + imuStatus + "\",\"gps_status\":\"" + gpsStatus + "\",\"gps_sats\":" + String(sats) + ",\"gps_hdop\":" + String(hdop) + ",\"raw_text\":\"" + String(rawDbg) + "\"}";
+            
+            // uploadSafetyEvent takes stateMutex internally. Release it here to avoid deadlock.
+            xSemaphoreGive(stateMutex);
+            uploadSafetyEvent("DIAGNOSTIC_RESULT", detailJson.c_str());
+            xSemaphoreTake(stateMutex, portMAX_DELAY);
+            ok = true;
         } else if (cmd == "WARN_EXPIRY") {
             if (sharedTelemetry.session_state == "ACTIVE") {
                 sharedTelemetry.session_state = "EXPIRING";
