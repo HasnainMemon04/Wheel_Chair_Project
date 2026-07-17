@@ -1,6 +1,9 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../utils/supabase';
 
+const OFFLINE_AFTER_MS = 30_000;
+const MAX_LIVE_EVENTS = 200;
+
 export interface DeviceState {
   wheelchair_id: string;
   ts: string;
@@ -10,10 +13,27 @@ export interface DeviceState {
   speed: number;
   sats: number;
   hdop: number;
+  gps_fix?: boolean;
+  gps_simulated?: boolean;
+  gps_course?: number | null;
+  gps_altitude?: number | null;
+  gps_age_ms?: number | null;
+  gps_chars?: number;
+  gps_sentences?: number;
+  gps_checksum_failures?: number;
+  gps_nmea_gga?: string | null;
+  gps_nmea_rmc?: string | null;
   pitch: number;
   roll: number;
   tilt: number;
   yaw: number;
+  imu_accel_x?: number | null;
+  imu_accel_y?: number | null;
+  imu_accel_z?: number | null;
+  imu_gyro_x?: number | null;
+  imu_gyro_y?: number | null;
+  imu_gyro_z?: number | null;
+  imu_age_ms?: number | null;
   temp_batt: number;
   batt_v: number;
   batt_pct: number;
@@ -81,12 +101,13 @@ export function useFleetState() {
 
         if (statesError) throw statesError;
 
-        // Fetch recent safety events (last 30)
+        // Preserve a complete OTA timeline rather than only the tail end of a
+        // fast download, while still keeping client memory bounded.
         const { data: eventsData, error: eventsError } = await supabase
           .from('events')
           .select('*')
           .order('ts', { ascending: false })
-          .limit(30);
+          .limit(MAX_LIVE_EVENTS);
 
         if (eventsError) throw eventsError;
 
@@ -95,7 +116,7 @@ export function useFleetState() {
           const enriched = (statesData || []).map(d => {
             if (!d.ts) return { ...d, last_seen_local: now, online: false };
             const age = now - new Date(d.ts).getTime();
-            const shouldBeOnline = age < 5000;
+            const shouldBeOnline = age < OFFLINE_AFTER_MS;
             return {
               ...d,
               last_seen_local: now - age,
@@ -163,11 +184,24 @@ export function useFleetState() {
       // Monitor new safety events
       .on(
         'postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'events' },
+        { event: '*', schema: 'public', table: 'events' },
         (payload) => {
           if (!active) return;
+
+          if (payload.eventType === 'DELETE') {
+            const deletedEvent = payload.old as SafetyEvent;
+            setEvents((prev) => prev.filter((event) => String(event.id) !== String(deletedEvent.id)));
+            return;
+          }
+
           const newEvent = payload.new as SafetyEvent;
-          setEvents((prev) => [newEvent, ...prev].slice(0, 50));
+          setEvents((prev) => {
+            if (payload.eventType === 'UPDATE') {
+              return prev.map((event) => String(event.id) === String(newEvent.id) ? newEvent : event);
+            }
+
+            return [newEvent, ...prev].slice(0, MAX_LIVE_EVENTS);
+          });
         }
       )
       .subscribe((status) => {
@@ -196,7 +230,7 @@ export function useFleetState() {
         const next = prev.map((d) => {
           if (!d.last_seen_local) return d;
           const age = now - d.last_seen_local;
-          const shouldBeOnline = age < 5000; // 5 seconds offline threshold
+          const shouldBeOnline = age < OFFLINE_AFTER_MS;
           if (d.online !== shouldBeOnline) {
             changed = true;
             return { ...d, online: shouldBeOnline };
@@ -210,5 +244,10 @@ export function useFleetState() {
     return () => clearInterval(timer);
   }, []);
 
-  return { deviceStates, events, loading, error };
+  const removeEvents = (eventIds: string[]) => {
+    const ids = new Set(eventIds.map(String));
+    setEvents((prev) => prev.filter((event) => !ids.has(String(event.id))));
+  };
+
+  return { deviceStates, events, loading, error, removeEvents };
 }

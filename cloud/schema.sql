@@ -28,7 +28,14 @@ create table if not exists device_state (
   online        boolean default false,
   lat double precision, lng double precision,
   speed real, sats int, hdop real,
+  gps_fix boolean default false,
+  gps_simulated boolean default false,
+  gps_course real, gps_altitude real, gps_age_ms int,
+  gps_chars bigint, gps_sentences bigint, gps_checksum_failures bigint,
+  gps_nmea_gga text, gps_nmea_rmc text,
   pitch real, roll real, tilt real, yaw real,
+  imu_accel_x real, imu_accel_y real, imu_accel_z real,
+  imu_gyro_x real, imu_gyro_y real, imu_gyro_z real, imu_age_ms int,
   temp_motor real, temp_batt real, temp_amb real, humidity real,
   batt_v real, batt_pct int, in_motion boolean, rssi int,
   tamper boolean default false, tamper_count int default 0,
@@ -53,6 +60,23 @@ create index if not exists idx_hist_chair_ts on telemetry_history (wheelchair_id
 alter table device_state add column if not exists tamper       boolean default false;
 alter table device_state add column if not exists tamper_count int default 0;
 alter table device_state add column if not exists yaw          real default 0.0;
+alter table device_state add column if not exists gps_fix      boolean default false;
+alter table device_state add column if not exists gps_simulated boolean default false;
+alter table device_state add column if not exists gps_course   real;
+alter table device_state add column if not exists gps_altitude real;
+alter table device_state add column if not exists gps_age_ms   int;
+alter table device_state add column if not exists gps_chars    bigint;
+alter table device_state add column if not exists gps_sentences bigint;
+alter table device_state add column if not exists gps_checksum_failures bigint;
+alter table device_state add column if not exists gps_nmea_gga text;
+alter table device_state add column if not exists gps_nmea_rmc text;
+alter table device_state add column if not exists imu_accel_x  real;
+alter table device_state add column if not exists imu_accel_y  real;
+alter table device_state add column if not exists imu_accel_z  real;
+alter table device_state add column if not exists imu_gyro_x   real;
+alter table device_state add column if not exists imu_gyro_y   real;
+alter table device_state add column if not exists imu_gyro_z   real;
+alter table device_state add column if not exists imu_age_ms   int;
 
 -- C1: persist device uptime (seconds) — distinct from the ts wall-clock column.
 alter table device_state add column if not exists uptime  int;
@@ -184,6 +208,10 @@ grant select, insert, update, delete on public.events to service_role;
 grant select, insert, update, delete on public.rentals to service_role;
 grant select, insert, update, delete on public.payments to service_role;
 grant select, insert, update, delete on public.commands to service_role;
+-- events.id is a bigserial backed by events_id_seq. Service-role API routes
+-- and Edge Functions that insert audit rows need sequence usage in addition to
+-- table INSERT privileges.
+grant usage, select on sequence public.events_id_seq to service_role;
 
 -- ---------------------------------------------------------------------------
 -- C2: Atomic payment → activation → unlock (called by the Vercel webhook).

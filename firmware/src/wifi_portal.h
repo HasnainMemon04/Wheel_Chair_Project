@@ -17,6 +17,11 @@ bool loadSavedWiFiCreds(String &ssid, String &pass);
 // Persist new creds to NVS.
 void saveWiFiCreds(const String &ssid, const String &pass);
 
+// Remove only the NVS-saved WiFi credentials once for a caller-provided
+// reset token. This makes the device fall back to config.h defaults without
+// erasing unrelated NVS state.
+bool resetSavedWiFiCredsOnce(const char *resetToken);
+
 // Blocking AP config portal. Runs until the user submits credentials (or timeoutMs elapses,
 // if timeoutMs > 0). On submit: saves creds to NVS and returns true. On timeout: returns false.
 // While open, it does NOT touch sensors/safety — those keep running on their own tasks.

@@ -12,8 +12,9 @@ bool isOTABusy();
 // Get the current download progress percentage (0 - 100)
 int getOTAPercent();
 
-// Handle incoming OTA command triggers
-void handleOTACommand(const String &url, const String &version, size_t size);
+// Handle an incoming OTA command. Returns false when the device rejects it
+// before scheduling any OTA work.
+bool handleOTACommand(const String &url, const String &version, size_t size);
 
 // Called when telemetry upload is successful to cancel rollback
 void markFirmwareValid();

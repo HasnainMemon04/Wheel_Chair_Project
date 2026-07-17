@@ -4,16 +4,38 @@
 struct TelemetryData {
     uint32_t uptime_s;
     bool gps_fix;
+    bool gps_simulated;
     double gps_lat;
     double gps_lng;
     float gps_speed_kmh;
+    double gps_physical_lat;
+    double gps_physical_lng;
+    float gps_physical_speed_kmh;
+    float gps_physical_course_deg;
+    float gps_physical_altitude_m;
     int gps_sats;
     float gps_hdop;
+    float gps_course_deg;
+    float gps_altitude_m;
+    uint32_t gps_last_data_ms;
+    uint32_t gps_last_fix_ms;
+    uint32_t gps_chars_processed;
+    uint32_t gps_sentences_valid;
+    uint32_t gps_checksum_failures;
+    char gps_nmea_gga[128];
+    char gps_nmea_rmc[128];
 
     float pitch;
     float roll;
     float tilt;
     float yaw;
+    float imu_accel_x_g;
+    float imu_accel_y_g;
+    float imu_accel_z_g;
+    float imu_gyro_x_dps;
+    float imu_gyro_y_dps;
+    float imu_gyro_z_dps;
+    uint32_t imu_last_sample_ms;
 
     float temp_battery;
 
