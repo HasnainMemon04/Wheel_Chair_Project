@@ -169,6 +169,13 @@ void safetySupervisorTask(void *pvParameters) {
         bool gfOn = sharedTelemetry.gf.on;
         xSemaphoreGive(stateMutex);
 
+        // Snapshot what this task observed. At the write-back boundary, only a
+        // value changed by another task should override local state-machine work.
+        const bool observedLocked = locked;
+        const bool observedPower = power;
+        const String observedState = state;
+        const int observedTimeLeft = timeLeft;
+
         // 1. SENSOR FAULT Check (Battery probe missing or failed/disconnected)
         if (isnan(tempBatt)) {
             if (!sensorFaultLatched) {
@@ -386,17 +393,24 @@ void safetySupervisorTask(void *pvParameters) {
         // 4. Save state updates back to shared data structures
         xSemaphoreTake(stateMutex, portMAX_DELAY);
         
-        // If the database states were updated by a command in the middle of our 50ms tick,
-        // and we don't have an active safety interlock, synchronize our local variables.
+        // If a command arrived during this 50 ms tick, consume that newer shared
+        // value. Comparing with the original snapshot preserves local transitions
+        // such as ENDING -> LOCKED instead of restoring the older shared state.
         if (sharedTelemetry.session_state != "SAFE_FAULT" && !safetyInterlockActive) {
-            if (sharedTelemetry.power_state != power) {
+            if (sharedTelemetry.power_state != observedPower) {
                 power = sharedTelemetry.power_state;
             }
-            if (sharedTelemetry.locked_state != locked) {
+            if (sharedTelemetry.locked_state != observedLocked) {
                 locked = sharedTelemetry.locked_state;
             }
-            if (sharedTelemetry.session_state != state) {
+            if (sharedTelemetry.session_state != observedState) {
                 state = sharedTelemetry.session_state;
+                if (state == "ENDING" && observedState != "ENDING") {
+                    endingRampTicks = 0;
+                }
+            }
+            if (sharedTelemetry.time_left_s != observedTimeLeft) {
+                timeLeft = sharedTelemetry.time_left_s;
             }
         }
 
