@@ -9,7 +9,7 @@ import { supabase } from '../../utils/supabase';
 import {
   MapPin, Battery, ShieldAlert, Zap, Clock, CreditCard,
   Lock, AlertTriangle, XCircle, ShieldOff,
-  RefreshCw
+  RefreshCw, ExternalLink
 } from 'lucide-react';
 
 // Dynamically import Leaflet Map to avoid Next.js SSR "window is not defined" crashes
@@ -298,9 +298,8 @@ export default function RiderPage() {
     }
   };
 
-  // Cancel Rental Handler. The LOCK + END_SESSION dispatch is awaited and
-  // verified BEFORE the wallet refund and UI reset — otherwise a failed insert
-  // (RLS/network) refunds the rider while the chair keeps driving (W2).
+  // Queue the device-supported session terminator before refunding or clearing
+  // local state. The server transaction also reconciles the rental lifecycle.
   const handleCancelRental = async () => {
     if (!activeRental || cancelTimeLeft <= 0) return;
 
@@ -310,14 +309,18 @@ export default function RiderPage() {
 
     setActionLoading(true);
     try {
-      const { error: cmdError } = await supabase.from('commands').insert([
-        { wheelchair_id: targetId, cmd: 'LOCK', args: {}, status: 'pending', req_id: `cancel-lock-${Date.now()}` },
-        { wheelchair_id: targetId, cmd: 'END_SESSION', args: {}, status: 'pending', req_id: `cancel-end-${Date.now()}` }
-      ]);
+      const response = await fetch('/api/rentals/end', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          wheelchair_id: targetId,
+          reason: 'rider_cancel'
+        })
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Unable to end the rental.');
 
-      if (cmdError) throw cmdError;
-
-      // Commands are queued — now it is safe to refund and clear the session.
+      // The transaction is committed and the device command is queued.
       if (price > 0) {
         updateWalletBalance(walletBalance + price);
       }
@@ -665,6 +668,16 @@ export default function RiderPage() {
                     <Battery className="w-3.5 h-3.5 text-emerald-400" />
                     <span>Battery Status: {getBatteryRangeText(selectedChair.batt_pct)} ({selectedChair.batt_pct}%)</span>
                   </p>
+                  <a
+                    href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${selectedChair.lat},${selectedChair.lng}`)}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="mt-2 inline-flex items-center gap-1.5 text-[11px] font-semibold text-blue-400 hover:text-blue-300"
+                  >
+                    <MapPin className="h-3.5 w-3.5" />
+                    View in Google Maps
+                    <ExternalLink className="h-3 w-3" />
+                  </a>
                 </div>
 
                 {selectedChairAvailability?.available ? (
