@@ -5,6 +5,9 @@ struct TelemetryData {
     uint32_t uptime_s;
     bool gps_fix;
     bool gps_simulated;
+    double gps_fallback_anchor_lat;
+    double gps_fallback_anchor_lng;
+    uint32_t gps_fallback_anchor_revision;
     double gps_lat;
     double gps_lng;
     float gps_speed_kmh;

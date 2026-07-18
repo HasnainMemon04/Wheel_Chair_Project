@@ -86,6 +86,7 @@ struct LocalCommand {
     float radius;
     double lat;
     double lng;
+    bool use_current_location;
     String ota_url;
     String ota_version;
     size_t ota_size;
@@ -536,6 +537,7 @@ void processCommands(const String &jsonResponse) {
         lc.radius = args["radius"] | GEOFENCE_RADIUS_M;
         lc.lat = args["lat"] | 24.860048;
         lc.lng = args["lng"] | 67.063734;
+        lc.use_current_location = args["use_current_location"] | false;
         lc.ota_url = args["url"].as<String>();
         lc.ota_version = args["version"].as<String>();
         lc.ota_size = args["size"] | 0;
@@ -564,6 +566,7 @@ void processCommands(const String &jsonResponse) {
         }
 
         bool ok = false;
+        String commandError;
         uint32_t sessionStartTs = 0;
         uint32_t sessionEndTs = 0;
 
@@ -734,21 +737,78 @@ void processCommands(const String &jsonResponse) {
             }
             ok = true;
         } else if (cmd == "SET_GEOFENCE") {
-            sharedTelemetry.gf.center_lat = lc.lat;
-            sharedTelemetry.gf.center_lng = lc.lng;
-            sharedTelemetry.gf.radius_m = lc.radius;
-            sharedTelemetry.gf.on = true;
-            // A fallback coordinate is display continuity, not geofence
-            // evidence. Defer enforcement until the next physical GPS fix.
-            if (sharedTelemetry.gps_fix) {
-                double dist = calculateDistance(sharedTelemetry.gps_lat, sharedTelemetry.gps_lng, lc.lat, lc.lng);
-                sharedTelemetry.gf.dist_m = dist;
-                sharedTelemetry.gf.inside = (dist <= lc.radius);
-            } else {
-                sharedTelemetry.gf.dist_m = 0.0f;
-                sharedTelemetry.gf.inside = true;
+            double centerLat = lc.lat;
+            double centerLng = lc.lng;
+
+            if (lc.use_current_location) {
+                if (sharedTelemetry.gps_fix) {
+                    // Resolve the center on-device at execution time. This
+                    // avoids network travel error while the chair is moving.
+                    centerLat = sharedTelemetry.gps_lat;
+                    centerLng = sharedTelemetry.gps_lng;
+                } else {
+                    commandError = "gps_fix_required";
+                }
             }
-            ok = true;
+
+            const bool coordinatesValid =
+                isfinite(centerLat) &&
+                isfinite(centerLng) &&
+                centerLat >= -90.0 &&
+                centerLat <= 90.0 &&
+                centerLng >= -180.0 &&
+                centerLng <= 180.0;
+            const bool radiusValid =
+                isfinite(lc.radius) &&
+                lc.radius >= 50.0f &&
+                lc.radius <= 2000.0f;
+
+            if (!coordinatesValid) {
+                commandError = "invalid_coordinates";
+            } else if (!radiusValid) {
+                commandError = "invalid_radius";
+            }
+
+            if (commandError.length() == 0) {
+                sharedTelemetry.gf.center_lat = centerLat;
+                sharedTelemetry.gf.center_lng = centerLng;
+                sharedTelemetry.gf.radius_m = lc.radius;
+                sharedTelemetry.gf.on = true;
+
+                // A fallback coordinate is display continuity, not geofence
+                // evidence. Defer enforcement until the next physical GPS fix.
+                if (sharedTelemetry.gps_fix) {
+                    const double dist = calculateDistance(
+                        sharedTelemetry.gps_lat,
+                        sharedTelemetry.gps_lng,
+                        centerLat,
+                        centerLng
+                    );
+                    sharedTelemetry.gf.dist_m = dist;
+                    sharedTelemetry.gf.inside = (dist <= lc.radius);
+                } else {
+                    sharedTelemetry.gf.dist_m = 0.0f;
+                    sharedTelemetry.gf.inside = true;
+                    // Keep the non-authoritative display position beside the
+                    // requested fence while the physical receiver has no fix.
+                    sharedTelemetry.gps_fallback_anchor_lat = centerLat;
+                    sharedTelemetry.gps_fallback_anchor_lng = centerLng;
+                    sharedTelemetry.gps_fallback_anchor_revision++;
+                    if (sharedTelemetry.gps_fallback_anchor_revision == 0) {
+                        sharedTelemetry.gps_fallback_anchor_revision = 1;
+                    }
+                    sharedTelemetry.gps_lat = centerLat;
+                    sharedTelemetry.gps_lng = centerLng;
+                    sharedTelemetry.gps_speed_kmh = 0.3f;
+                    sharedTelemetry.gps_simulated = true;
+                }
+                ok = true;
+            } else {
+                Serial.printf(
+                    "[Network] Rejected SET_GEOFENCE: %s\n",
+                    commandError.c_str()
+                );
+            }
         } else if (cmd == "OTA") {
             xSemaphoreGive(stateMutex);
             ok = handleOTACommand(lc.ota_url, lc.ota_version, lc.ota_size);
@@ -762,6 +822,11 @@ void processCommands(const String &jsonResponse) {
         bool currentPower = sharedTelemetry.power_state;
         bool currentLocked = sharedTelemetry.locked_state;
         String currentSessionState = sharedTelemetry.session_state;
+        bool currentGeofenceOn = sharedTelemetry.gf.on;
+        bool currentGeofenceInside = sharedTelemetry.gf.inside;
+        double currentGeofenceLat = sharedTelemetry.gf.center_lat;
+        double currentGeofenceLng = sharedTelemetry.gf.center_lng;
+        float currentGeofenceRadius = sharedTelemetry.gf.radius_m;
         xSemaphoreGive(stateMutex);
 
         // Apply changes to relays IMMEDIATELY (sub-millisecond actuation)
@@ -780,6 +845,9 @@ void processCommands(const String &jsonResponse) {
         ackDoc["id"] = cmdId;
         ackDoc["req_id"] = reqId;
         ackDoc["ok"] = ok;
+        if (commandError.length() > 0) {
+            ackDoc["error"] = commandError;
+        }
         if (sessionStartTs > 0) {
             ackDoc["session_start_ts"] = sessionStartTs;
         }
@@ -791,6 +859,14 @@ void processCommands(const String &jsonResponse) {
         stateObj["power"] = currentPower;
         stateObj["locked"] = currentLocked;
         stateObj["session_state"] = currentSessionState;
+        if (cmd == "SET_GEOFENCE") {
+            JsonObject geofenceObj = stateObj["geofence"].to<JsonObject>();
+            geofenceObj["on"] = currentGeofenceOn;
+            geofenceObj["inside"] = currentGeofenceInside;
+            geofenceObj["lat"] = currentGeofenceLat;
+            geofenceObj["lng"] = currentGeofenceLng;
+            geofenceObj["radius"] = currentGeofenceRadius;
+        }
 
         String ackPayload;
         serializeJson(ackDoc, ackPayload);

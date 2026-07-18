@@ -155,6 +155,9 @@ void initSensors() {
     sharedTelemetry.uptime_s = 0;
     sharedTelemetry.gps_fix = false;
     sharedTelemetry.gps_simulated = true;
+    sharedTelemetry.gps_fallback_anchor_lat = 24.8601;
+    sharedTelemetry.gps_fallback_anchor_lng = 67.0637;
+    sharedTelemetry.gps_fallback_anchor_revision = 1;
     sharedTelemetry.gps_lat = 24.8601;
     sharedTelemetry.gps_lng = 67.0637;
     sharedTelemetry.gps_speed_kmh = 0.3f;
@@ -288,6 +291,8 @@ void gpsTask(void *pvParameters) {
     size_t nmeaLength = 0;
     const uint32_t GPS_FIX_TIMEOUT_MS = 2000;
     const uint32_t FALLBACK_UPDATE_MS = 200;
+    const uint32_t MIN_FIX_SATELLITES = 3;
+    const float MAX_FIX_HDOP = 20.0f;
     const double METERS_PER_DEGREE_LAT = 111320.0;
     const double DEFAULT_FALLBACK_LAT = 24.8601;
     const double DEFAULT_FALLBACK_LNG = 67.0637;
@@ -296,6 +301,7 @@ void gpsTask(void *pvParameters) {
     double fallbackAnchorLng = DEFAULT_FALLBACK_LNG;
     float fallbackAngleRad = 0.0f;
     uint32_t fallbackLastUpdateMs = millis();
+    uint32_t fallbackAnchorRevision = 0;
     bool physicalFixActive = false;
 
     while (true) {
@@ -324,11 +330,37 @@ void gpsTask(void *pvParameters) {
         }
 
         const uint32_t now = millis();
+        const double candidateLat = gps.location.lat();
+        const double candidateLng = gps.location.lng();
+        const bool coordinatesValid =
+            isfinite(candidateLat) &&
+            isfinite(candidateLng) &&
+            candidateLat >= -90.0 &&
+            candidateLat <= 90.0 &&
+            candidateLng >= -180.0 &&
+            candidateLng <= 180.0 &&
+            !(candidateLat == 0.0 && candidateLng == 0.0);
+        const bool fixQualityValid =
+            gps.satellites.isValid() &&
+            gps.satellites.value() >= MIN_FIX_SATELLITES &&
+            gps.hdop.isValid() &&
+            gps.hdop.hdop() > 0.0f &&
+            gps.hdop.hdop() <= MAX_FIX_HDOP;
         const bool hasFreshFix =
             gps.location.isValid() &&
-            gps.location.age() <= GPS_FIX_TIMEOUT_MS;
+            gps.location.age() <= GPS_FIX_TIMEOUT_MS &&
+            coordinatesValid &&
+            fixQualityValid;
 
         xSemaphoreTake(stateMutex, portMAX_DELAY);
+        if (sharedTelemetry.gps_fallback_anchor_revision != fallbackAnchorRevision) {
+            fallbackAnchorLat = sharedTelemetry.gps_fallback_anchor_lat;
+            fallbackAnchorLng = sharedTelemetry.gps_fallback_anchor_lng;
+            fallbackAnchorRevision = sharedTelemetry.gps_fallback_anchor_revision;
+            fallbackAngleRad = 0.0f;
+            fallbackLastUpdateMs = now;
+        }
+
         sharedTelemetry.gps_chars_processed = gps.charsProcessed();
         sharedTelemetry.gps_sentences_valid = gps.passedChecksum();
         sharedTelemetry.gps_checksum_failures = gps.failedChecksum();
@@ -348,8 +380,8 @@ void gpsTask(void *pvParameters) {
 
         sharedTelemetry.gps_fix = hasFreshFix;
         if (hasFreshFix) {
-            sharedTelemetry.gps_lat = gps.location.lat();
-            sharedTelemetry.gps_lng = gps.location.lng();
+            sharedTelemetry.gps_lat = candidateLat;
+            sharedTelemetry.gps_lng = candidateLng;
             sharedTelemetry.gps_speed_kmh = gps.speed.isValid() ? gps.speed.kmph() : 0.0f;
             sharedTelemetry.gps_physical_lat = sharedTelemetry.gps_lat;
             sharedTelemetry.gps_physical_lng = sharedTelemetry.gps_lng;
@@ -363,6 +395,8 @@ void gpsTask(void *pvParameters) {
 
             fallbackAnchorLat = sharedTelemetry.gps_lat;
             fallbackAnchorLng = sharedTelemetry.gps_lng;
+            sharedTelemetry.gps_fallback_anchor_lat = fallbackAnchorLat;
+            sharedTelemetry.gps_fallback_anchor_lng = fallbackAnchorLng;
             fallbackLastUpdateMs = now;
 
             if (!physicalFixActive) {

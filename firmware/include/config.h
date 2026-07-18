@@ -7,7 +7,7 @@
 
 // ------------------------- Identity -------------------------
 #define DEVICE_ID          "WCHAIR-002"
-#define FW_VERSION         "0.3.9"
+#define FW_VERSION         "0.3.11"
 
 // ------------------------- WiFi & Supabase Credentials -------
 #if __has_include("private_config.h")
