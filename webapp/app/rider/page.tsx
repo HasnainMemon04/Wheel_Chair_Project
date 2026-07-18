@@ -8,7 +8,7 @@ import { useFleetState, DeviceState } from '../../hooks/useFleetState';
 import { supabase } from '../../utils/supabase';
 import {
   MapPin, Battery, ShieldAlert, Zap, Clock, CreditCard,
-  PlusCircle, CheckCircle2, Lock, AlertTriangle, XCircle, ShieldOff,
+  Lock, AlertTriangle, XCircle, ShieldOff,
   RefreshCw
 } from 'lucide-react';
 
@@ -23,13 +23,62 @@ const Map = dynamic(() => import('../../components/Map'), {
   )
 });
 
+type ChairAvailability = {
+  available: boolean;
+  label: string;
+  description: string;
+};
+
+function getChairAvailability(chair: DeviceState): ChairAvailability {
+  if (!chair.online) {
+    return {
+      available: false,
+      label: 'Offline',
+      description: 'This wheelchair is disconnected. Rental will be available after it reconnects.'
+    };
+  }
+
+  if (!chair.power) {
+    return {
+      available: false,
+      label: 'Unavailable',
+      description: 'This wheelchair is currently powered down.'
+    };
+  }
+
+  if (chair.session_state === 'SAFE_FAULT') {
+    return {
+      available: false,
+      label: 'Safety lock',
+      description: 'This wheelchair requires an operator safety check before it can be rented.'
+    };
+  }
+
+  const readyState = !chair.session_state
+    || chair.session_state === 'LOCKED'
+    || chair.session_state === 'AVAILABLE';
+
+  if (!chair.locked || !readyState) {
+    return {
+      available: false,
+      label: 'In use',
+      description: 'This wheelchair has an active session and cannot be rented yet.'
+    };
+  }
+
+  return {
+    available: true,
+    label: 'Available',
+    description: 'Online, locked, and ready to rent.'
+  };
+}
+
 export default function RiderPage() {
   const { deviceStates, loading: fleetLoading, error } = useFleetState();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [activeRental, setActiveRental] = useState<any | null>(null);
   const [timeLeft, setTimeLeft] = useState<number>(0);
   const [actionLoading, setActionLoading] = useState(false);
-  const [seeding, setSeeding] = useState(false);
   const [userCoords, setUserCoords] = useState<{ lat: number; lng: number } | null>(null);
 
   // Request browser geolocation to show live distance and walking times
@@ -107,9 +156,15 @@ export default function RiderPage() {
     localStorage.setItem('simulated_wallet_balance', newBalance.toFixed(2));
   };
 
-  // Filter for available chairs
-  const availableChairs = deviceStates.filter(d => d.online && (!d.session_state || d.session_state === 'LOCKED' || d.session_state === 'AVAILABLE'));
+  // Keep the complete fleet visible, with rentable chairs first.
+  const fleetChairs = [...deviceStates].sort((a, b) => {
+    const availabilityDelta = Number(getChairAvailability(b).available) - Number(getChairAvailability(a).available);
+    if (availabilityDelta !== 0) return availabilityDelta;
+    if (a.online !== b.online) return Number(b.online) - Number(a.online);
+    return a.wheelchair_id.localeCompare(b.wheelchair_id);
+  });
   const selectedChair = deviceStates.find(d => d.wheelchair_id === selectedId);
+  const selectedChairAvailability = selectedChair ? getChairAvailability(selectedChair) : null;
   const handleChairRowKeyDown = (event: React.KeyboardEvent<HTMLDivElement>, id: string) => {
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault();
@@ -155,32 +210,16 @@ export default function RiderPage() {
     return () => clearInterval(tick);
   }, [activeRental, cancelDeadline]);
 
-  // Seed a wheelchair for easy dev testing
-  const handleSeedMockWheelchair = async () => {
-    setSeeding(true);
-    try {
-      const res = await fetch('/api/seed', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        }
-      });
-      
-      const result = await res.json();
-      if (!res.ok) throw new Error(result.error || "Failed to seed mock wheelchair");
-      
-      setSelectedId('WCHAIR-001');
-      alert("Mock Wheelchair WCHAIR-001 successfully registered and online!");
-    } catch (err: any) {
-      alert("Error seeding device: " + err.message);
-    } finally {
-      setSeeding(false);
-    }
-  };
-
   // Rent / Unlock trigger (checks wallet balance and calls payment webhook)
   const handleRent = async (durationMinutes: number) => {
     if (!selectedId) return;
+
+    const targetChair = deviceStates.find(d => d.wheelchair_id === selectedId);
+    if (!targetChair || !getChairAvailability(targetChair).available) {
+      alert('This wheelchair is not currently available to rent. Please select an online, locked chair.');
+      return;
+    }
+
     setActionLoading(true);
 
     const price = durationMinutes === 1 ? 0 : durationMinutes === 15 ? 5.00 : 10.00;
@@ -551,52 +590,55 @@ export default function RiderPage() {
                   <div key={i} className="h-20 bg-zinc-900 animate-pulse rounded-xl border border-zinc-800/40" />
                 ))}
               </div>
-            ) : availableChairs.length === 0 ? (
+            ) : fleetChairs.length === 0 ? (
               <div className="text-center p-6 border border-dashed border-zinc-800 rounded-xl">
-                <p className="text-zinc-500 text-sm">No available chairs online.</p>
-                <button 
-                  onClick={handleSeedMockWheelchair}
-                  disabled={seeding}
-                  className="mt-4 inline-flex items-center gap-1.5 text-xs text-blue-500 hover:text-blue-400 font-semibold cursor-pointer"
-                >
-                  <PlusCircle className="w-4 h-4" />
-                  {seeding ? "Seeding..." : "Seed Mock Wheelchair (WCHAIR-001)"}
-                </button>
+                <p className="text-zinc-500 text-sm">No wheelchairs are registered yet.</p>
               </div>
             ) : (
               <div className="space-y-3">
-                {availableChairs.map((chair) => (
-                  <div 
-                    key={chair.wheelchair_id}
-                    role="button"
-                    tabIndex={0}
-                    aria-pressed={selectedId === chair.wheelchair_id}
-                    onClick={() => setSelectedId(chair.wheelchair_id)}
-                    onKeyDown={(event) => handleChairRowKeyDown(event, chair.wheelchair_id)}
-                    className={`p-4 rounded-xl border transition-all cursor-pointer flex justify-between items-center ${
-                      selectedId === chair.wheelchair_id 
-                        ? 'border-blue-500/60 bg-blue-500/5' 
-                        : 'border-zinc-900 hover:border-zinc-800 bg-zinc-900/30'
-                    }`}
-                  >
-                    <div>
-                      <h3 className="font-semibold text-sm">{chair.wheelchair_id}</h3>
-                      <p className="text-zinc-500 text-xs mt-0.5 flex items-center gap-1">
-                        <MapPin className="w-3.5 h-3.5 text-blue-500" />
-                        {getDistanceText(chair.lat, chair.lng)}
-                      </p>
+                {fleetChairs.map((chair) => {
+                  const availability = getChairAvailability(chair);
+
+                  return (
+                    <div
+                      key={chair.wheelchair_id}
+                      role="button"
+                      tabIndex={0}
+                      aria-pressed={selectedId === chair.wheelchair_id}
+                      aria-label={`${chair.wheelchair_id}, ${availability.label}`}
+                      onClick={() => setSelectedId(chair.wheelchair_id)}
+                      onKeyDown={(event) => handleChairRowKeyDown(event, chair.wheelchair_id)}
+                      className={`p-4 rounded-xl border transition-all cursor-pointer flex justify-between items-center ${
+                        selectedId === chair.wheelchair_id
+                          ? availability.available
+                            ? 'border-blue-500/60 bg-blue-500/5'
+                            : 'border-zinc-600 bg-zinc-900/60'
+                          : 'border-zinc-900 hover:border-zinc-800 bg-zinc-900/30'
+                      } ${availability.available ? '' : 'grayscale opacity-60'}`}
+                    >
+                      <div>
+                        <h3 className="font-semibold text-sm">{chair.wheelchair_id}</h3>
+                        <p className="text-zinc-500 text-xs mt-0.5 flex items-center gap-1">
+                          <MapPin className="w-3.5 h-3.5 text-blue-500" />
+                          {getDistanceText(chair.lat, chair.lng)}
+                        </p>
+                      </div>
+                      <div className="flex flex-col items-end gap-1.5">
+                        <span className="flex items-center gap-1 text-xs text-zinc-400">
+                          <Battery className="w-3.5 h-3.5 text-emerald-500" />
+                          {getBatteryRangeText(chair.batt_pct)}
+                        </span>
+                        <span className={`px-2 py-0.5 rounded text-[10px] font-semibold ${
+                          availability.available
+                            ? 'bg-emerald-500/10 text-emerald-400'
+                            : 'bg-zinc-800 text-zinc-400'
+                        }`}>
+                          {availability.label}
+                        </span>
+                      </div>
                     </div>
-                    <div className="flex flex-col items-end gap-1.5">
-                      <span className="flex items-center gap-1 text-xs text-zinc-400">
-                        <Battery className="w-3.5 h-3.5 text-emerald-500" />
-                        {getBatteryRangeText(chair.batt_pct)}
-                      </span>
-                      <span className="px-2 py-0.5 rounded bg-zinc-800 text-zinc-400 text-[10px] font-semibold">
-                        Available
-                      </span>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -614,7 +656,7 @@ export default function RiderPage() {
               >
                 <div>
                   <h3 className="font-semibold text-sm flex items-center justify-between gap-2">
-                    <span>Rent {selectedChair.wheelchair_id}</span>
+                    <span>{selectedChairAvailability?.available ? 'Rent' : 'Selected'} {selectedChair.wheelchair_id}</span>
                     <span className="text-[10px] bg-blue-500/10 text-blue-400 px-2 py-0.5 rounded-full font-bold uppercase tracking-wider">
                       {getDistanceText(selectedChair.lat, selectedChair.lng)}
                     </span>
@@ -625,28 +667,42 @@ export default function RiderPage() {
                   </p>
                 </div>
 
-                <div className="grid grid-cols-3 gap-2">
-                  {[
-                    { label: '1 Min', value: 1, price: 'Free Demo' },
-                    { label: '15 Mins', value: 15, price: '5.00 SAR' },
-                    { label: '30 Mins', value: 30, price: '10.00 SAR' }
-                  ].map((plan) => (
-                    <button 
-                      key={plan.value}
-                      onClick={() => handleRent(plan.value)}
-                      disabled={actionLoading}
-                      className="flex flex-col items-center justify-center p-3 rounded-lg bg-zinc-900 border border-zinc-800 hover:border-blue-500/50 hover:bg-zinc-800/50 transition-all text-center cursor-pointer"
-                    >
-                      <span className="text-xs font-semibold text-zinc-300">{plan.label}</span>
-                      <span className="text-[10px] text-zinc-500 mt-1">{plan.price}</span>
-                    </button>
-                  ))}
-                </div>
+                {selectedChairAvailability?.available ? (
+                  <>
+                    <div className="grid grid-cols-3 gap-2">
+                      {[
+                        { label: '1 Min', value: 1, price: 'Free Demo' },
+                        { label: '15 Mins', value: 15, price: '5.00 SAR' },
+                        { label: '30 Mins', value: 30, price: '10.00 SAR' }
+                      ].map((plan) => (
+                        <button
+                          key={plan.value}
+                          onClick={() => handleRent(plan.value)}
+                          disabled={actionLoading}
+                          className="flex flex-col items-center justify-center p-3 rounded-lg bg-zinc-900 border border-zinc-800 hover:border-blue-500/50 hover:bg-zinc-800/50 transition-all text-center cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          <span className="text-xs font-semibold text-zinc-300">{plan.label}</span>
+                          <span className="text-[10px] text-zinc-500 mt-1">{plan.price}</span>
+                        </button>
+                      ))}
+                    </div>
 
-                <div className="text-[10px] text-zinc-500 leading-normal flex items-start gap-1.5 mt-2">
-                  <CreditCard className="w-3.5 h-3.5 flex-shrink-0 text-zinc-400" />
-                  Payments processed in SAR. Deducted directly from your simulated balance.
-                </div>
+                    <div className="text-[10px] text-zinc-500 leading-normal flex items-start gap-1.5 mt-2">
+                      <CreditCard className="w-3.5 h-3.5 flex-shrink-0 text-zinc-400" />
+                      Payments processed in SAR. Deducted directly from your simulated balance.
+                    </div>
+                  </>
+                ) : (
+                  <div className="flex items-start gap-2 rounded-lg border border-zinc-800 bg-zinc-900/70 p-3">
+                    <Lock className="w-4 h-4 text-zinc-500 flex-shrink-0 mt-0.5" />
+                    <div>
+                      <p className="text-xs font-semibold text-zinc-300">{selectedChairAvailability?.label}</p>
+                      <p className="text-[11px] leading-relaxed text-zinc-500 mt-1">
+                        {selectedChairAvailability?.description}
+                      </p>
+                    </div>
+                  </div>
+                )}
               </motion.div>
             )}
           </AnimatePresence>
