@@ -7,11 +7,20 @@ import { type SafetyEvent, useFleetState } from '../../hooks/useFleetState';
 import { supabase } from '../../utils/supabase';
 import {
   Zap, Battery, ShieldAlert, Thermometer, Radio,
-  MapPin, Sliders, Play, Square, Unlock, Lock, RefreshCw, AlertTriangle, ShieldOff, Trash2, Activity
+  MapPin, Sliders, Play, Square, Unlock, Lock, RefreshCw, AlertTriangle,
+  ShieldOff, Trash2, Activity, Crosshair, CheckCircle2
 } from 'lucide-react';
 import Link from 'next/link';
 
 const DISMISSED_FEED_EVENTS_KEY = 'wheelchair-console-dismissed-feed-events';
+const GEOFENCE_ACK_ATTEMPTS = 20;
+const GEOFENCE_ACK_INTERVAL_MS = 750;
+
+type GeofenceCenterMode = 'live' | 'manual';
+type GeofenceApplyState = {
+  status: 'idle' | 'pending' | 'success' | 'error';
+  message: string;
+};
 
 // Dynamic import to bypass Next.js SSR window check
 const Map = dynamic(() => import('../../components/Map'), {
@@ -203,6 +212,11 @@ export default function OperatorPage() {
   const [gfRadius, setGfRadius] = useState<number>(300);
   const [gfLat, setGfLat] = useState<string>("24.860048");
   const [gfLng, setGfLng] = useState<string>("67.063734");
+  const [gfCenterMode, setGfCenterMode] = useState<GeofenceCenterMode>('live');
+  const [gfApplyState, setGfApplyState] = useState<GeofenceApplyState>({
+    status: 'idle',
+    message: ''
+  });
 
   // Track pending command states for each chair to support Optimistic UI
   const [pendingStates, setPendingStates] = useState<Record<string, { power?: boolean; locked?: boolean; ts?: number }>>({});
@@ -211,6 +225,17 @@ export default function OperatorPage() {
   const [lastSeenS, setLastSeenS] = useState<number | null>(null);
 
   const selectedChair = deviceStates.find((d) => d.wheelchair_id === selectedId);
+  const hasTrustedGpsFix =
+    selectedChair?.gps_fix === true &&
+    selectedChair.gps_simulated !== true &&
+    Number.isFinite(selectedChair.lat) &&
+    Number.isFinite(selectedChair.lng);
+  const displayedGfLat = gfCenterMode === 'live' && hasTrustedGpsFix && selectedChair
+    ? selectedChair.lat.toFixed(6)
+    : gfLat;
+  const displayedGfLng = gfCenterMode === 'live' && hasTrustedGpsFix && selectedChair
+    ? selectedChair.lng.toFixed(6)
+    : gfLng;
   const latestDiagnosticEvent = selectedChair
     ? events.find((event) =>
         event.wheelchair_id === selectedChair.wheelchair_id &&
@@ -222,10 +247,30 @@ export default function OperatorPage() {
     ? queuedOtaRequestEvents.filter((event) => event.wheelchair_id === selectedChair.wheelchair_id)
     : [];
   const visibleFeedEvents = events.filter((event) => !dismissedFeedEventIds.has(String(event.id)));
+  const selectManualGeofenceCenter = () => {
+    setGfLat(displayedGfLat);
+    setGfLng(displayedGfLng);
+    setGfCenterMode('manual');
+    setGfApplyState({ status: 'idle', message: '' });
+  };
+
+  const selectDevice = (id: string) => {
+    const chair = deviceStates.find((device) => device.wheelchair_id === id);
+    setSelectedId(id);
+    setGfCenterMode('live');
+    setGfApplyState({ status: 'idle', message: '' });
+
+    if (chair) {
+      setGfLat(chair.lat.toFixed(6));
+      setGfLng(chair.lng.toFixed(6));
+      setGfRadius(chair.geofence?.r ?? 300);
+    }
+  };
+
   const handleDeviceRowKeyDown = (event: React.KeyboardEvent<HTMLDivElement>, id: string) => {
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault();
-      setSelectedId(id);
+      selectDevice(id);
     }
   };
 
@@ -242,22 +287,6 @@ export default function OperatorPage() {
       console.warn('Could not restore dismissed feed notifications:', storageError);
     }
   }, []);
-
-  // Prefill geofence coordinates when a new device is selected
-  useEffect(() => {
-    if (selectedId) {
-      const chair = deviceStates.find((d) => d.wheelchair_id === selectedId);
-      if (chair) {
-        setGfLat((chair.lat ?? 0).toFixed(6));
-        setGfLng((chair.lng ?? 0).toFixed(6));
-        if (chair.geofence) {
-          setGfRadius(chair.geofence.r);
-        } else {
-          setGfRadius(300); // default fallback
-        }
-      }
-    }
-  }, [selectedId]);
 
   // Reconcile optimistic states with incoming DB updates
   useEffect(() => {
@@ -395,6 +424,128 @@ export default function OperatorPage() {
         return next;
       });
       return false;
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const applyGeofence = async () => {
+    if (!selectedChair || actionLoading) return;
+
+    if (!selectedChair.online) {
+      setGfApplyState({
+        status: 'error',
+        message: 'Device is offline. Geofence was not queued.'
+      });
+      return;
+    }
+
+    if (gfCenterMode === 'live' && !hasTrustedGpsFix) {
+      setGfApplyState({
+        status: 'error',
+        message: 'Waiting for a real NEO-M8N GPS fix. Simulated coordinates are not accepted.'
+      });
+      return;
+    }
+
+    const lat = gfCenterMode === 'live' ? selectedChair.lat : Number.parseFloat(gfLat);
+    const lng = gfCenterMode === 'live' ? selectedChair.lng : Number.parseFloat(gfLng);
+
+    if (
+      !Number.isFinite(lat) ||
+      !Number.isFinite(lng) ||
+      lat < -90 ||
+      lat > 90 ||
+      lng < -180 ||
+      lng > 180
+    ) {
+      setGfApplyState({
+        status: 'error',
+        message: 'Enter valid latitude and longitude coordinates.'
+      });
+      return;
+    }
+
+    setActionLoading(true);
+    setGfApplyState({
+      status: 'pending',
+      message: 'Sending geofence and waiting for ESP32 confirmation...'
+    });
+
+    try {
+      const reqId = `geofence-${Date.now()}`;
+      const { data: inserted, error: insertError } = await supabase
+        .from('commands')
+        .insert({
+          wheelchair_id: selectedChair.wheelchair_id,
+          cmd: 'SET_GEOFENCE',
+          args: {
+            lat,
+            lng,
+            radius: gfRadius,
+            use_current_location: gfCenterMode === 'live'
+          },
+          status: 'pending',
+          req_id: reqId
+        })
+        .select('id')
+        .single();
+
+      if (insertError) throw insertError;
+
+      for (let attempt = 0; attempt < GEOFENCE_ACK_ATTEMPTS; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, GEOFENCE_ACK_INTERVAL_MS));
+
+        const { data: command, error: commandError } = await supabase
+          .from('commands')
+          .select('status, ack')
+          .eq('id', inserted.id)
+          .single();
+
+        if (commandError) throw commandError;
+
+        if (command.status === 'acked') {
+          const ack = asRecord(command.ack);
+          const state = asRecord(ack.state);
+          const appliedGeofence = asRecord(state.geofence);
+          const appliedLat = typeof appliedGeofence.lat === 'number'
+            ? appliedGeofence.lat
+            : lat;
+          const appliedLng = typeof appliedGeofence.lng === 'number'
+            ? appliedGeofence.lng
+            : lng;
+
+          setGfLat(appliedLat.toFixed(6));
+          setGfLng(appliedLng.toFixed(6));
+          setGfApplyState({
+            status: 'success',
+            message: `ESP32 confirmed ${gfRadius} m geofence at ${appliedLat.toFixed(6)}, ${appliedLng.toFixed(6)}.`
+          });
+          return;
+        }
+
+        if (command.status === 'failed') {
+          const ack = asRecord(command.ack);
+          const reason = typeof ack.error === 'string' ? `: ${ack.error}` : '';
+          setGfApplyState({
+            status: 'error',
+            message: `ESP32 rejected the geofence${reason}.`
+          });
+          return;
+        }
+      }
+
+      setGfApplyState({
+        status: 'error',
+        message: 'ESP32 confirmation timed out. Check device connectivity before retrying.'
+      });
+    } catch (commandError) {
+      setGfApplyState({
+        status: 'error',
+        message: commandError instanceof Error
+          ? `Geofence failed: ${commandError.message}`
+          : 'Geofence command failed.'
+      });
     } finally {
       setActionLoading(false);
     }
@@ -780,7 +931,7 @@ export default function OperatorPage() {
         <Map
           deviceStates={deviceStates}
           selectedId={selectedId}
-          onSelectDevice={setSelectedId}
+          onSelectDevice={selectDevice}
         />
       </div>
 
@@ -869,7 +1020,7 @@ export default function OperatorPage() {
                         role="button"
                         tabIndex={0}
                         aria-pressed={selectedId === d.wheelchair_id}
-                        onClick={() => setSelectedId(d.wheelchair_id)}
+                        onClick={() => selectDevice(d.wheelchair_id)}
                         onKeyDown={(event) => handleDeviceRowKeyDown(event, d.wheelchair_id)}
                         className={`p-3.5 rounded-xl border cursor-pointer transition-all flex items-center justify-between ${
                           selectedId === d.wheelchair_id
@@ -1152,15 +1303,55 @@ export default function OperatorPage() {
                           <span className="font-semibold text-zinc-300 text-[10px] bg-zinc-800 px-1.5 py-0.5 rounded">{gfRadius} meters</span>
                         </div>
 
-                        {/* Manual coordinates input */}
+                        <div className="grid grid-cols-2 rounded-md border border-zinc-800 bg-zinc-950 p-0.5">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setGfCenterMode('live');
+                              setGfApplyState({ status: 'idle', message: '' });
+                            }}
+                            className={`flex min-h-8 items-center justify-center gap-1.5 rounded px-2 text-[9px] font-bold uppercase transition-colors ${
+                              gfCenterMode === 'live'
+                                ? 'bg-blue-600 text-white'
+                                : 'text-zinc-500 hover:text-zinc-300'
+                            }`}
+                          >
+                            <Crosshair className="h-3 w-3" />
+                            Live GPS
+                          </button>
+                          <button
+                            type="button"
+                            onClick={selectManualGeofenceCenter}
+                            className={`min-h-8 rounded px-2 text-[9px] font-bold uppercase transition-colors ${
+                              gfCenterMode === 'manual'
+                                ? 'bg-zinc-800 text-white'
+                                : 'text-zinc-500 hover:text-zinc-300'
+                            }`}
+                          >
+                            Manual
+                          </button>
+                        </div>
+
+                        <div className={`flex items-center gap-2 text-[9px] font-semibold ${
+                          hasTrustedGpsFix ? 'text-emerald-300' : 'text-amber-300'
+                        }`}>
+                          <span className={`h-1.5 w-1.5 rounded-full ${
+                            hasTrustedGpsFix ? 'bg-emerald-400' : 'bg-amber-400'
+                          }`} />
+                          {hasTrustedGpsFix
+                            ? `Physical fix · ${selectedChair.sats} satellites · HDOP ${selectedChair.hdop.toFixed(2)}`
+                            : 'No physical GPS fix · choose Manual or wait for GPS'}
+                        </div>
+
                         <div className="grid grid-cols-2 gap-2">
                           <div className="space-y-1">
                             <label className="text-[9px] uppercase font-bold text-zinc-500">Center Latitude</label>
                             <input
                               type="text"
-                              value={gfLat}
+                              value={displayedGfLat}
                               onChange={(e) => setGfLat(e.target.value)}
-                              className="w-full bg-zinc-900 border border-zinc-800 p-2 rounded text-xs font-mono text-zinc-200 focus:outline-none focus:border-blue-500"
+                              readOnly={gfCenterMode === 'live'}
+                              className="w-full bg-zinc-900 border border-zinc-800 p-2 rounded text-xs font-mono text-zinc-200 focus:outline-none focus:border-blue-500 read-only:text-emerald-200 read-only:cursor-default"
                               placeholder="24.860048"
                             />
                           </div>
@@ -1168,9 +1359,10 @@ export default function OperatorPage() {
                             <label className="text-[9px] uppercase font-bold text-zinc-500">Center Longitude</label>
                             <input
                               type="text"
-                              value={gfLng}
+                              value={displayedGfLng}
                               onChange={(e) => setGfLng(e.target.value)}
-                              className="w-full bg-zinc-900 border border-zinc-800 p-2 rounded text-xs font-mono text-zinc-200 focus:outline-none focus:border-blue-500"
+                              readOnly={gfCenterMode === 'live'}
+                              className="w-full bg-zinc-900 border border-zinc-800 p-2 rounded text-xs font-mono text-zinc-200 focus:outline-none focus:border-blue-500 read-only:text-emerald-200 read-only:cursor-default"
                               placeholder="67.063734"
                             />
                           </div>
@@ -1191,24 +1383,44 @@ export default function OperatorPage() {
                         </div>
 
                         <button
-                          onClick={() => {
-                            const latVal = parseFloat(gfLat);
-                            const lngVal = parseFloat(gfLng);
-                            if (isNaN(latVal) || isNaN(lngVal)) {
-                              alert("Please enter valid decimal coordinates for latitude and longitude.");
-                              return;
-                            }
-                            triggerCommand('SET_GEOFENCE', {
-                              lat: latVal,
-                              lng: lngVal,
-                              radius: gfRadius
-                            });
-                          }}
-                          disabled={actionLoading}
-                          className="w-full py-2 text-[10px] font-bold bg-blue-600 hover:bg-blue-500 text-white rounded transition-all cursor-pointer uppercase tracking-wider"
+                          onClick={applyGeofence}
+                          disabled={
+                            actionLoading ||
+                            !selectedChair.online ||
+                            (gfCenterMode === 'live' && !hasTrustedGpsFix)
+                          }
+                          className="flex min-h-10 w-full items-center justify-center gap-2 rounded bg-blue-600 px-3 text-[10px] font-bold uppercase tracking-wider text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-zinc-800 disabled:text-zinc-500"
                         >
-                          Apply Custom Geofence
+                          {actionLoading ? (
+                            <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <Crosshair className="h-3.5 w-3.5" />
+                          )}
+                          {actionLoading
+                            ? 'Waiting for ESP32'
+                            : gfCenterMode === 'live'
+                              ? 'Apply at Live Position'
+                              : 'Apply Manual Geofence'}
                         </button>
+
+                        {gfApplyState.status !== 'idle' && (
+                          <div className={`flex items-start gap-2 rounded-md border p-2 text-[9px] font-semibold leading-relaxed ${
+                            gfApplyState.status === 'success'
+                              ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
+                              : gfApplyState.status === 'pending'
+                                ? 'border-blue-500/30 bg-blue-500/10 text-blue-200'
+                                : 'border-red-500/30 bg-red-500/10 text-red-200'
+                          }`}>
+                            {gfApplyState.status === 'success' ? (
+                              <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                            ) : gfApplyState.status === 'pending' ? (
+                              <RefreshCw className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin" />
+                            ) : (
+                              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                            )}
+                            <span>{gfApplyState.message}</span>
+                          </div>
+                        )}
                       </div>
 
                       {/* Device Diagnostics */}
