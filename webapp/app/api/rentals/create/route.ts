@@ -11,8 +11,72 @@ export async function POST(request: Request) {
   try {
     const { wheelchair_id, duration_s } = await request.json();
 
-    if (!wheelchair_id || !duration_s) {
-      return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
+    if (
+      typeof wheelchair_id !== 'string'
+      || !wheelchair_id.trim()
+      || !Number.isInteger(duration_s)
+      || duration_s <= 0
+    ) {
+      return NextResponse.json({ error: 'Invalid wheelchair or rental duration.' }, { status: 400 });
+    }
+
+    const { data: chair, error: chairError } = await supabase
+      .from('device_state')
+      .select('wheelchair_id, ts, online, power, locked, session_state')
+      .eq('wheelchair_id', wheelchair_id)
+      .maybeSingle();
+
+    if (chairError) {
+      console.error('Wheelchair availability query failed:', chairError);
+      return NextResponse.json({ error: 'Unable to verify wheelchair availability.' }, { status: 500 });
+    }
+
+    const telemetryAgeMs = chair?.ts ? Date.now() - Date.parse(chair.ts) : Number.POSITIVE_INFINITY;
+    const telemetryIsFresh = telemetryAgeMs >= 0 && telemetryAgeMs < 30_000;
+    const sessionIsReady = !chair?.session_state
+      || chair.session_state === 'LOCKED'
+      || chair.session_state === 'AVAILABLE';
+    const chairIsAvailable = Boolean(
+      chair
+      && telemetryIsFresh
+      && chair.online !== false
+      && chair.power
+      && chair.locked
+      && sessionIsReady
+    );
+
+    if (!chairIsAvailable) {
+      return NextResponse.json(
+        { error: 'This wheelchair is offline, in use, or not safely locked. Refresh and choose an available chair.' },
+        { status: 409 }
+      );
+    }
+
+    const { data: openRentals, error: openRentalsError } = await supabase
+      .from('rentals')
+      .select('state, end_at, created_at')
+      .eq('wheelchair_id', wheelchair_id)
+      .in('state', ['reserved', 'active', 'expiring', 'ending']);
+
+    if (openRentalsError) {
+      console.error('Rental conflict query failed:', openRentalsError);
+      return NextResponse.json({ error: 'Unable to verify rental availability.' }, { status: 500 });
+    }
+
+    const now = Date.now();
+    const hasLiveRental = (openRentals || []).some((rental) => {
+      if (rental.state === 'reserved') {
+        return Boolean(rental.created_at && now - Date.parse(rental.created_at) < 10 * 60_000);
+      }
+
+      return !rental.end_at || Date.parse(rental.end_at) > now;
+    });
+
+    if (hasLiveRental) {
+      return NextResponse.json(
+        { error: 'This wheelchair already has an active or pending rental.' },
+        { status: 409 }
+      );
     }
 
     // Attempt to retrieve a default profile ID (fallback to null if none exists)
