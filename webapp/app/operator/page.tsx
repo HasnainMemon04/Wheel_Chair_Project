@@ -21,6 +21,10 @@ type GeofenceApplyState = {
   status: 'idle' | 'pending' | 'success' | 'error';
   message: string;
 };
+type SessionEndState = {
+  status: 'idle' | 'confirming' | 'pending' | 'success' | 'error';
+  message: string;
+};
 
 // Dynamic import to bypass Next.js SSR window check
 const Map = dynamic(() => import('../../components/Map'), {
@@ -207,6 +211,10 @@ export default function OperatorPage() {
   const [diagnosticPending, setDiagnosticPending] = useState(false);
   const [diagnosticBaselineId, setDiagnosticBaselineId] = useState<string | null>(null);
   const [diagnosticError, setDiagnosticError] = useState<string | null>(null);
+  const [sessionEndState, setSessionEndState] = useState<SessionEndState>({
+    status: 'idle',
+    message: ''
+  });
 
   // Custom inputs for commands
   const [gfRadius, setGfRadius] = useState<number>(300);
@@ -225,6 +233,10 @@ export default function OperatorPage() {
   const [lastSeenS, setLastSeenS] = useState<number | null>(null);
 
   const selectedChair = deviceStates.find((d) => d.wheelchair_id === selectedId);
+  const selectedSessionIsActive = Boolean(
+    selectedChair
+    && ['ACTIVE', 'EXPIRING', 'ENDING'].includes(selectedChair.session_state)
+  );
   const hasTrustedGpsFix =
     selectedChair?.gps_fix === true &&
     selectedChair.gps_simulated !== true &&
@@ -428,6 +440,86 @@ export default function OperatorPage() {
       setActionLoading(false);
     }
   };
+
+  const requestSessionEnd = async () => {
+    if (!selectedChair || actionLoading) return;
+
+    if (!selectedChair.online) {
+      setSessionEndState({
+        status: 'error',
+        message: 'The wheelchair is offline. No command was queued.'
+      });
+      return;
+    }
+
+    setActionLoading(true);
+    setSessionEndState({
+      status: 'pending',
+      message: 'Command queued. Waiting for the wheelchair to decelerate and lock...'
+    });
+
+    try {
+      const response = await fetch('/api/rentals/end', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          wheelchair_id: selectedChair.wheelchair_id,
+          reason: 'operator_cancel'
+        })
+      });
+      const result = await response.json();
+
+      if (!response.ok) {
+        throw new Error(result.error || 'Unable to queue the session-end command.');
+      }
+
+      if (result.message === 'already_available') {
+        setSessionEndState({
+          status: 'success',
+          message: 'The wheelchair is already locked and available.'
+        });
+      }
+    } catch (error) {
+      setSessionEndState({
+        status: 'error',
+        message: error instanceof Error ? error.message : 'Session-end request failed.'
+      });
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    setSessionEndState({ status: 'idle', message: '' });
+  }, [selectedId]);
+
+  useEffect(() => {
+    if (
+      sessionEndState.status === 'pending'
+      && selectedChair?.locked
+      && ['LOCKED', 'AVAILABLE'].includes(selectedChair.session_state)
+    ) {
+      setSessionEndState({
+        status: 'success',
+        message: 'ESP32 confirmed the session ended. The wheelchair is now available to riders.'
+      });
+    }
+  }, [selectedChair?.locked, selectedChair?.session_state, sessionEndState.status]);
+
+  useEffect(() => {
+    if (sessionEndState.status !== 'pending') return;
+
+    const timeout = window.setTimeout(() => {
+      setSessionEndState((current) => current.status === 'pending'
+        ? {
+            status: 'error',
+            message: 'No lock confirmation was received. Check connectivity before retrying.'
+          }
+        : current);
+    }, 20_000);
+
+    return () => window.clearTimeout(timeout);
+  }, [sessionEndState.status]);
 
   const applyGeofence = async () => {
     if (!selectedChair || actionLoading) return;
@@ -1251,6 +1343,79 @@ export default function OperatorPage() {
                     {/* Actuation Command buttons */}
                     <div className="space-y-3 border-t border-zinc-900 pt-4">
                       <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-wider">Actuate Device</h4>
+
+                      {(selectedSessionIsActive || sessionEndState.status !== 'idle') && (
+                        <div className={`space-y-2 rounded-lg border p-3 ${
+                          sessionEndState.status === 'success'
+                            ? 'border-emerald-500/20 bg-emerald-500/5'
+                            : sessionEndState.status === 'error'
+                            ? 'border-red-500/20 bg-red-500/5'
+                            : 'border-amber-500/20 bg-amber-500/5'
+                        }`}>
+                          {sessionEndState.status === 'confirming' ? (
+                            <>
+                              <div className="flex items-start gap-2">
+                                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
+                                <div>
+                                  <p className="text-[11px] font-bold text-amber-200">End active rider session?</p>
+                                  <p className="mt-1 text-[10px] leading-relaxed text-zinc-400">
+                                    The wheelchair will decelerate, lock, and become available after ESP32 confirmation.
+                                    {selectedChair.speed > 1
+                                      ? ` GPS currently reports ${selectedChair.speed.toFixed(1)} km/h. Confirm only when it is safe to stop.`
+                                      : ''}
+                                  </p>
+                                </div>
+                              </div>
+                              <div className="grid grid-cols-2 gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => setSessionEndState({ status: 'idle', message: '' })}
+                                  className="rounded-lg border border-zinc-800 bg-zinc-900 py-2 text-[10px] font-bold text-zinc-400 hover:bg-zinc-800"
+                                >
+                                  Keep session
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={requestSessionEnd}
+                                  disabled={actionLoading}
+                                  className="rounded-lg border border-red-500/30 bg-red-600 py-2 text-[10px] font-bold text-white hover:bg-red-500 disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                  Confirm end
+                                </button>
+                              </div>
+                            </>
+                          ) : selectedSessionIsActive ? (
+                            <button
+                              type="button"
+                              onClick={() => setSessionEndState({
+                                status: 'confirming',
+                                message: ''
+                              })}
+                              disabled={actionLoading || sessionEndState.status === 'pending'}
+                              className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-amber-500/25 bg-amber-500/10 py-2.5 text-xs font-bold text-amber-300 hover:bg-amber-500/15 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              {sessionEndState.status === 'pending' ? (
+                                <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                              ) : (
+                                <Square className="h-3.5 w-3.5" />
+                              )}
+                              {sessionEndState.status === 'pending' ? 'Ending session...' : 'End active session'}
+                            </button>
+                          ) : null}
+
+                          {sessionEndState.message && (
+                            <p aria-live="polite" className={`text-[10px] leading-relaxed ${
+                              sessionEndState.status === 'success'
+                                ? 'text-emerald-300'
+                                : sessionEndState.status === 'error'
+                                ? 'text-red-300'
+                                : 'text-blue-300'
+                            }`}>
+                              {sessionEndState.message}
+                            </p>
+                          )}
+                        </div>
+                      )}
 
                       <div className="grid grid-cols-1">
                         <button
